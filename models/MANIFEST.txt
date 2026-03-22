@@ -1,0 +1,76 @@
+======================================================================
+UPLIFT MODELING PIPELINE — MODEL PACKAGE MANIFEST
+======================================================================
+Generated  : 2026-03-21T16:02:17.381245
+Directory  : /home/ahmad/Ab_exam_practices/models
+
+──────────────────────────────────────────────────────────────────────
+ARTEFACTS
+──────────────────────────────────────────────────────────────────────
+
+  Step-1 Pruner
+    File    : step1_pruner.joblib
+    Details : Variance threshold=0.01, Correlation threshold=0.95
+            : Features removed (variance): 198, (correlation): 174
+
+  Step-2 Boruta-SHAP
+    File    : step2_boruta.joblib
+    Details : n_trials=100, percentile=100
+            : Features selected: 4
+
+  X-Learner Uplift
+    File    : xlearner_uplift.joblib
+    Details : Arms: [1, 2, 3]
+            : Feature set size: 4
+
+  Attrition Model
+    File    : attrition_model.joblib
+    Details : XGBClassifier — predicts P(on-book at month 9)
+            : Feature set size: 4
+
+  Feature Name List
+    File    : feature_names.json
+    Details : 4 features survive Steps 1+2
+
+  Config Snapshot
+    File    : pipeline_config.json
+    Details : Cost params, arm map, decile settings at training time
+
+──────────────────────────────────────────────────────────────────────
+TREATMENT / OFFER DESIGN
+──────────────────────────────────────────────────────────────────────
+  Arm 0: Control     offer=$0
+  Arm 1: $100        offer=$100
+  Arm 2: $400        offer=$400
+  Arm 3: $500        offer=$500
+
+──────────────────────────────────────────────────────────────────────
+COST PARAMETERS
+──────────────────────────────────────────────────────────────────────
+  Offer cost rate  : 0.1 (× offer $)
+  Stipulation cost : $5.0 per prospect
+  Remail cost      : $3.0 per prospect
+
+──────────────────────────────────────────────────────────────────────
+DECILE TARGETING
+──────────────────────────────────────────────────────────────────────
+  Total deciles    : 10
+  Top deciles mailed: 3  (~30% of population)
+
+──────────────────────────────────────────────────────────────────────
+HOW TO SCORE NEW DATA
+──────────────────────────────────────────────────────────────────────
+  python src/scoring/score_new_data.py \
+      --input  path/to/new_prospects.csv \
+      --output path/to/scored_prospects.csv
+
+  Output columns:
+    cate_treatment_1/2/3  — CATE (uplift) per offer arm
+    retention_probability — P(on-book at month 9)
+    net_value_arm_0/1/2/3 — net value per arm
+    optimal_offer_arm     — best arm ID
+    optimal_offer_name    — e.g. '$400'
+    optimal_net_value     — net value of best arm
+    decile                — 1 (lowest) to 10 (highest)
+    mail_flag             — 1 = top-3 decile → send letter
+======================================================================

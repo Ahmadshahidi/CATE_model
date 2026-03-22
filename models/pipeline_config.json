@@ -1,0 +1,42 @@
+{
+  "saved_at": "2026-03-21T16:02:17.381245",
+  "random_seed": 42,
+  "treatment_components": {
+    "0": 0,
+    "1": 100,
+    "2": 400,
+    "3": 500
+  },
+  "treatments": {
+    "0": "Control",
+    "1": "$100",
+    "2": "$400",
+    "3": "$500"
+  },
+  "offer_amounts": [
+    100,
+    400,
+    500
+  ],
+  "offer_cost_rate": 0.1,
+  "stipulation_cost": 5.0,
+  "remail_cost": 3.0,
+  "n_deciles": 10,
+  "top_n_deciles": 3,
+  "log_transform_target": false,
+  "xgboost_params": {
+    "objective": "reg:squarederror",
+    "n_estimators": 200,
+    "max_depth": 5,
+    "learning_rate": 0.05,
+    "reg_alpha": 10.0,
+    "reg_lambda": 1.0,
+    "subsample": 0.7,
+    "random_state": 42,
+    "n_jobs": -1
+  },
+  "variance_threshold": 0.01,
+  "correlation_threshold": 0.95,
+  "boruta_n_trials": 100,
+  "boruta_percentile": 100
+}
