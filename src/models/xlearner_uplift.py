@@ -29,6 +29,7 @@ Usage:
 
 import os
 import sys
+import time
 import warnings
 import numpy as np
 import pandas as pd
@@ -38,6 +39,11 @@ from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBRegressor
+try:
+    from tqdm import tqdm as _tqdm
+    _HAS_TQDM = True
+except ImportError:
+    _HAS_TQDM = False
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
@@ -97,16 +103,22 @@ class XLearnerUplift:
     # ------------------------------------------------------------------
     # Fit
     # ------------------------------------------------------------------
-    def fit(self, X: pd.DataFrame, y, treatment, test_size: float = None):
+    def fit(self, X: pd.DataFrame, y, treatment,
+            sample_weight=None, test_size: float = None):
         """
         Fit the X-Learner for all treatment arms vs. control.
 
         Parameters
         ----------
-        X         : pd.DataFrame   Boruta-SHAP selected features.
-        y         : array-like     Continuous outcome (opening_balance).
-        treatment : array-like     Multi-arm treatment ID (0 = control).
-        test_size : float          Held-out fraction for evaluation curves.
+        X             : pd.DataFrame   Boruta-SHAP selected features.
+        y             : array-like     Continuous outcome (opening_balance).
+        treatment     : array-like     Multi-arm treatment ID (0 = control).
+        sample_weight : array-like or None
+            Per-observation weights (e.g. IPTW weights).  When provided,
+            weights are passed to every XGBoost ``fit()`` call.
+            The control-arm weight array is re-used across all arms.
+            If None, all weights default to 1.0 (standard, unweighted fit).
+        test_size     : float          Held-out fraction for evaluation curves.
         """
         test_size = test_size or config.TEST_SIZE
         self.feature_names = X.columns.tolist()
@@ -116,18 +128,41 @@ class XLearnerUplift:
         y_arr   = np.array(y, dtype=float)
         t_arr   = np.array(treatment, dtype=int)
 
+        # Normalise sample_weight to a numpy array (or None)
+        if sample_weight is not None:
+            sw_arr = np.array(sample_weight, dtype=float)
+            assert len(sw_arr) == len(y_arr), (
+                f"sample_weight length ({len(sw_arr)}) must match dataset "
+                f"length ({len(y_arr)})"
+            )
+            print(f"\n  IPTW sample weights supplied — "
+                  f"min={sw_arr.min():.4f}  max={sw_arr.max():.4f}  "
+                  f"mean={sw_arr.mean():.4f}")
+        else:
+            sw_arr = None
+
         if config.LOG_TRANSFORM_TARGET:
             y_arr = np.log1p(y_arr.clip(0))
 
         # ── Control outcome model (shared across arms) ────────────
         ctrl_mask = t_arr == 0
+        sw_ctrl   = sw_arr[ctrl_mask] if sw_arr is not None else None
         print(f"\n  Fitting control outcome model  (n={ctrl_mask.sum():,}) ...")
         mu0 = self._fit_outcome_model(X_arr[ctrl_mask], y_arr[ctrl_mask],
-                                       self.feature_names)
+                                       self.feature_names,
+                                       sample_weight=sw_ctrl)
         mu0_pred_all = self._predict_outcome(mu0, X_arr, self.feature_names)
 
         # ── Per-arm X-Learner ─────────────────────────────────────
-        for arm_id in self.arm_ids:
+        arm_iter = (
+            _tqdm(self.arm_ids, desc='  Training arms', unit='arm', ncols=80,
+                  bar_format='  {desc}: {percentage:3.0f}%|{bar}| '
+                              '{n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
+            if _HAS_TQDM else self.arm_ids
+        )
+
+        for arm_id in arm_iter:
+            t_arm_start = time.time()
             arm_mask = t_arr == arm_id
             print(f"\n  Arm {arm_id} ({config.TREATMENTS[arm_id]})  "
                   f"n_treated={arm_mask.sum():,}  n_control={ctrl_mask.sum():,}")
@@ -137,24 +172,34 @@ class XLearnerUplift:
             X_c  = X_arr[ctrl_mask]
             y_c  = y_arr[ctrl_mask]
 
+            sw_t = sw_arr[arm_mask] if sw_arr is not None else None
+            sw_c = sw_ctrl          # already sliced above
+
             # Stage 1 — treated outcome model
-            mu1 = self._fit_outcome_model(X_t, y_t, self.feature_names)
+            print(f"    [1/4] Fitting treated outcome model (µ₁) ...")
+            mu1 = self._fit_outcome_model(X_t, y_t, self.feature_names,
+                                           sample_weight=sw_t)
             mu1_pred_ctrl = self._predict_outcome(mu1, X_c, self.feature_names)
 
             # Stage 2 — pseudo-outcomes
+            print(f"    [2/4] Computing CATE pseudo-outcomes ...")
             mu0_pred_treated = mu0_pred_all[arm_mask]
             D_tilde_treated  = y_t - mu0_pred_treated          # for treated
             D_tilde_control  = mu1_pred_ctrl - y_c             # for control
 
-            # Stage 3 — CATE models
             print(f"    CATE pseudo-outcomes: "
                   f"treated mean={D_tilde_treated.mean():+.2f}  "
                   f"control mean={D_tilde_control.mean():+.2f}")
 
-            tau_t = self._fit_cate_model(X_t, D_tilde_treated, self.feature_names)
-            tau_c = self._fit_cate_model(X_c, D_tilde_control, self.feature_names)
+            # Stage 3 — CATE models
+            print(f"    [3/4] Fitting CATE models (τ_t, τ_c) ...")
+            tau_t = self._fit_cate_model(X_t, D_tilde_treated, self.feature_names,
+                                          sample_weight=sw_t)
+            tau_c = self._fit_cate_model(X_c, D_tilde_control, self.feature_names,
+                                          sample_weight=sw_c)
 
             # Propensity score (used to blend τ_t and τ_c)
+            print(f"    [4/4] Fitting propensity score model ...")
             ps_model, ps_scaler = self._fit_propensity(X_arr, (t_arr == arm_id).astype(int))
 
             self.models[arm_id] = {
@@ -168,10 +213,12 @@ class XLearnerUplift:
 
             # Quick diagnostic
             cate_all = self._predict_cate_for_arm(arm_id, X_arr, self.feature_names)
+            arm_elapsed = time.time() - t_arm_start
             print(f"    CATE diagnostics: mean={cate_all.mean():+.2f}  "
                   f"median={np.median(cate_all):+.2f}  "
                   f"std={cate_all.std():.2f}  "
-                  f"pct_positive={100*(cate_all>0).mean():.1f}%")
+                  f"pct_positive={100*(cate_all>0).mean():.1f}%  "
+                  f"[{arm_elapsed:.1f}s]")
 
         return self
 
@@ -457,8 +504,9 @@ class XLearnerUplift:
     # Internal model helpers
     # ------------------------------------------------------------------
     def _fit_outcome_model(self, X_arr: np.ndarray, y_arr: np.ndarray,
-                            feature_names: list) -> XGBRegressor:
-        """Fit Stage-1 outcome model."""
+                            feature_names: list,
+                            sample_weight=None) -> XGBRegressor:
+        """Fit Stage-1 outcome model, optionally with IPTW sample weights."""
         model = XGBRegressor(**{k: v for k, v in config.XGBOOST_PARAMS.items()})
 
         mc = config.MONOTONE_CONSTRAINTS
@@ -470,7 +518,7 @@ class XLearnerUplift:
                     monotone_constraints=mono_tuple,
                 )
 
-        model.fit(X_arr, y_arr, verbose=False)
+        model.fit(X_arr, y_arr, sample_weight=sample_weight, verbose=False)
         return model
 
     def _predict_outcome(self, model: XGBRegressor,
@@ -479,10 +527,11 @@ class XLearnerUplift:
         return model.predict(X_arr)
 
     def _fit_cate_model(self, X_arr: np.ndarray, D_tilde: np.ndarray,
-                         feature_names: list) -> XGBRegressor:
-        """Fit Stage-3 CATE model on pseudo-outcomes."""
+                         feature_names: list,
+                         sample_weight=None) -> XGBRegressor:
+        """Fit Stage-3 CATE model on pseudo-outcomes, optionally with IPTW weights."""
         model = XGBRegressor(**{k: v for k, v in config.XGBOOST_PARAMS.items()})
-        model.fit(X_arr, D_tilde, verbose=False)
+        model.fit(X_arr, D_tilde, sample_weight=sample_weight, verbose=False)
         return model
 
     def _fit_propensity(self, X_arr: np.ndarray,
@@ -523,16 +572,20 @@ class XLearnerUplift:
 def train_xlearner(X: pd.DataFrame,
                    y,
                    treatment,
+                   sample_weight=None,
                    save_results_dir: str = None) -> tuple:
     """
     Train the X-Learner uplift model and optionally save outputs.
 
     Parameters
     ----------
-    X                : pd.DataFrame  Boruta-SHAP selected features.
-    y                : array-like    Continuous outcome (opening_balance).
-    treatment        : array-like    Multi-arm treatment IDs.
-    save_results_dir : str           If provided, save charts and CSVs here.
+    X                : pd.DataFrame   Boruta-SHAP selected features.
+    y                : array-like     Continuous outcome (opening_balance).
+    treatment        : array-like     Multi-arm treatment IDs.
+    sample_weight    : array-like or None
+        Per-observation IPTW weights.  Passed directly to XGBoost
+        ``fit()`` at every stage.  None → unweighted (default).
+    save_results_dir : str            If provided, save charts and CSVs here.
 
     Returns
     -------
@@ -543,6 +596,9 @@ def train_xlearner(X: pd.DataFrame,
     print("\n" + "="*60)
     print("X-LEARNER UPLIFT MODEL TRAINING")
     print("="*60)
+    bias_method = getattr(config, 'BIAS_CORRECTION_METHOD', 'none')
+    print(f"\n  Bias correction  : {bias_method.upper()}")
+    print(f"  Weighted fit     : {'Yes (IPTW)' if sample_weight is not None else 'No'}")
     print(f"\n  Samples  : {len(X):,}")
     print(f"  Features : {X.shape[1]}")
     arm_counts = pd.Series(treatment).value_counts().sort_index()
@@ -550,7 +606,7 @@ def train_xlearner(X: pd.DataFrame,
         print(f"  Arm {arm_id} ({config.TREATMENTS.get(arm_id, arm_id):<10}): {cnt:>6,}")
 
     xlearner = XLearnerUplift()
-    xlearner.fit(X, y, treatment)
+    xlearner.fit(X, y, treatment, sample_weight=sample_weight)
 
     print(f"\n  ✓ X-Learner training complete")
 

@@ -1,6 +1,6 @@
 # Incremental Campaign Uplift Modeling
 
-A comprehensive machine learning pipeline for modeling treatment effects in bank marketing campaigns using the **3-Step Sieve** feature selection method, **X-Learner** for uplift modeling, and **attrition prediction**.
+A comprehensive machine learning pipeline for modeling treatment effects in bank marketing campaigns using the **3-Step Sieve** feature selection method, **X-Learner** for uplift modeling, and **attrition prediction** with net-value offer optimisation.
 
 ## 📋 Project Overview
 
@@ -8,8 +8,9 @@ This project models the opening balance of prospects in an incremental bank camp
 
 1. **What is the causal effect of each offer on opening balance?** (Uplift Modeling)
 2. **Who will be on-book at month 9 vs. attrited?** (Attrition Prediction)
+3. **Which offer maximises net value per prospect?** (Net Value Optimisation)
 
-The project uses **Epsilon-like data** with 1,800 variables and employs a sophisticated 3-step feature selection process to handle high-dimensional data effectively.
+The project uses **Epsilon-like synthetic data** with 1,800 variables and employs a sophisticated feature selection process, bias correction, and a multi-scenario offer optimiser.
 
 ---
 
@@ -17,115 +18,140 @@ The project uses **Epsilon-like data** with 1,800 variables and employs a sophis
 
 ### 1. **3-Step Sieve Feature Selection**
 
-The industry gold standard approach for high-dimensional marketing datasets:
-
 #### **Step 1: Initial Pruning**
-- **Variance Thresholding**: Removes near-constant features (e.g., "Luxury Car Owner" that is 0 for 99.9% of data)
+- **Variance Thresholding**: Removes near-constant features (variance < 0.01)
 - **Correlation Filter**: Eliminates redundant features with Pearson correlation > 0.95
-- **Reduces**: ~1,800 → ~500-700 features
+- **Reduces**: ~1,800 → ~500–700 features
 
 #### **Step 2: Boruta-SHAP**
 - Creates "shadow features" (shuffled versions) and competes them against originals
 - Uses SHAP values for better interaction detection
-- Only keeps features that significantly outperform their randomized "evil twins"
-- **Reduces**: ~500-700 → ~100-200 features
+- Only keeps features that significantly outperform their randomised "evil twins"
+- **Reduces**: ~500–700 → ~100–200 features
+- *Compatibility patches applied*: `np.NaN → np.nan` (NumPy 2.x) and `scipy.stats.binom_test` (SciPy 1.12+) are monkey-patched on import so the BorutaShap package works without modification
 
 #### **Step 3: L1 Regularization (LASSO)**
 - Embedded directly in XGBoost base learners (`reg_alpha` parameter)
 - Automatically shrinks less-useful coefficients to zero
-- Ensures final models are parsimonious and avoid overfitting
 
-### 2. **X-Learner for Uplift Modeling**
+### 2. **Bias Correction (configurable)**
 
-- **Multi-treatment** handling (3 treatments vs. control)
-- Estimates **Conditional Average Treatment Effects (CATE)** for each prospect
-- Identifies heterogeneous treatment effects (who benefits most from which offer)
-- Uses L1-regularized XGBoost as base learners
+Controlled by `BIAS_CORRECTION_METHOD` in `config.py`:
 
-### 3. **Propensity Score Matching (PSM)**
+#### **Propensity Score Matching (PSM)** (`'psm'`)
+- Runs 1:1 nearest-neighbour matching for each treatment arm vs. control
+- Caliper matching on the log-odds scale
+- Balance diagnostics via Standardised Mean Difference (SMD) Love plots
+- By default, diagnostics only — set `USE_MATCHED_DATA_FOR_XLEARNER = True` to train on matched data
 
-A dedicated **selection-bias diagnostic** step that verifies covariate balance across treatment arms before modeling begins:
+#### **Inverse Probability of Treatment Weighting (IPTW)** (`'iptw'`)
+- Stabilised weights: `w = P(T) / P(T | X)` (recommended)
+- Multinomial logistic regression or XGBoost propensity estimator
+- Extreme weight trimming at configurable percentile
+- Weighted SMD Love plots and Effective Sample Size (ESS) diagnostics
+- *Note*: `multi_class='multinomial'` was removed from `LogisticRegression` for scikit-learn ≥ 1.5 compatibility — multinomial is now the default
 
-#### **Overview**
-- Runs **after** Boruta-SHAP feature selection, using the reduced covariate set
-- Performs **1:1 nearest-neighbour matching** for each treatment arm against the control group
-- Default mode is **diagnostic only** — the matched dataset is not used for X-Learner training unless `USE_MATCHED_DATA_FOR_XLEARNER = True` in `config.py`
+#### **None** (`'none'`)
+- No bias correction; X-Learner trains on full unweighted data
 
-#### **Propensity Score Estimation**
-- Supports two estimators (controlled via `PSM_METHOD` in `config.py`):
-  - `'logistic'` — L2-regularised logistic regression (default)
-  - `'xgboost'` — XGBoost classifier (richer nonlinear PS model)
-- Features are **standardised** with `StandardScaler` before estimation
+### 3. **X-Learner for Uplift Modeling**
 
-#### **Matching Algorithm**
-- **Log-odds caliper** matching: distance is measured on the log-odds scale of the propensity score
-- Caliper width = `PSM_CALIPER × std(log-odds PS)` (default 0.2 × σ)
-- Treated units without a control match within the caliper are discarded
-- `matched_data` dict stores the resulting balanced dataset per arm
-
-#### **Balance Diagnostics**
-- **Standardised Mean Difference (SMD)** computed before and after matching for every covariate
-- A feature is considered balanced when |SMD| < 0.10
-- Results saved to `propensity_balance_summary.csv`
-
-#### **Visualisations Generated**
-| File | Description |
-|------|-------------|
-| `psm_love_plot_arm{N}.png` | Love plot — |SMD| before vs. after matching for key covariates |
-| `psm_propensity_overlap_before.png` | PS histograms (treated vs. control) before matching |
-| `psm_propensity_overlap_after.png` | PS histograms (treated vs. control) after matching |
-| `psm_covariate_balance_arm{N}.png` | Box plots for key covariates before/after matching |
+- Multi-treatment CATE estimation (3 treatment arms vs. control)
+- Identifies heterogeneous treatment effects by customer segment
+- L1-regularised XGBoost base learners with optional monotonic constraints
+- Optional log-transform of the target variable
 
 ### 4. **Attrition Prediction Model**
 
-- Binary classification for month-9 retention
-- XGBoost classifier with L1 regularization
-- Produces probability scores for targeting
+Binary classification for month-9 retention using XGBoost. The synthetic data generating process (DGP) now drives `on_book_month9` with **12 predictors**:
+
+| Predictor | Direction | Rationale |
+|-----------|-----------|-----------|
+| `credit_score_modeled` | + | Better credit → stays longer |
+| `opening_balance` | + | Higher balance → more committed |
+| Treatment arm (1/2/3) | − | Incentive offers attract price-sensitive customers |
+| `age` | + | Older customers more loyal/stable |
+| `debt_to_income_ratio` | − | Financial strain → churn |
+| `revolving_utilization` | − | High util → less stable |
+| `direct_mail_responsiveness` | + | Responsive → more engaged |
+| `homeowner_flag` | + | Homeowners more stable |
+| `financial_stress_index` | − | Stress → churn risk |
+| `checking_account_balance_est` | + | Higher balance → more engaged |
+| `income × arm3` interaction | − | High-income + $500 offer → more selective |
+| `remail` / `stipulation` | + (small) | Re-contact slightly improves engagement |
+
+### 5. **Net Value Optimisation & Scenario Analysis**
+
+- For each prospect, computes net value under every offer arm:
+  `NV = P(retention) × (Baseline + CATE) − offer_cost − scenario_costs`
+- Assigns the **optimal offer** that maximises net value
+- Runs **4 scenarios** (remail × stipulation ON/OFF combinations)
+- Benchmarks personalised strategy vs. "everyone gets same offer" and random assignment
+- **Decile targeting**: evaluates mailing only top-N deciles vs. the full population
+- AUUC (Area Under Uplift Curve) computed across all strategies
+
+---
+
+## 📊 Synthetic Data Design
+
+The data generating process creates realistic heterogeneous treatment effects so the optimiser distributes offers across all three arms:
+
+| Offer Arm | Sweet-spot customer profile |
+|-----------|-----------------------------|
+| **$100** | Low income + high financial stress + high revolving utilisation |
+| **$400** | Mid income + high direct-mail responsiveness + homeowner |
+| **$500** | High income + high net worth + holds investment account |
+
+**Retention direction** is correctly specified: larger offers attract more price-sensitive customers, so retention probability *decreases* with offer size (Control ~68% → $500 ~52%).
 
 ---
 
 ## 📁 Project Structure
 
 ```
-Ab_exam_practices/
+CATE_Model/
 ├── README.md                          # This file
 ├── requirements.txt                   # Python dependencies
-├── config.py                          # Centralized configuration
+├── config.py                          # Centralised configuration
 ├── pipeline.py                        # Main orchestration script
 │
-├── data/                              # Generated/uploaded data
+├── data/                              # Generated / uploaded data
 │   └── epsilon_synthetic.csv
+│
+├── models/                            # Serialised model artefacts
+│   ├── attrition_model.joblib
+│   ├── step1_pruner.joblib
+│   ├── step2_boruta.joblib
+│   ├── xlearner_uplift.joblib
+│   ├── feature_names.json
+│   ├── pipeline_config.json
+│   └── MANIFEST.txt
 │
 ├── src/                               # Source code
 │   ├── __init__.py
-│   ├── data_generation.py             # Synthetic data generator
+│   ├── data_generation.py             # Synthetic Epsilon-like data generator
+│   ├── utils.py
 │   │
-│   ├── feature_selection/             # 3-step sieve modules
+│   ├── feature_selection/
 │   │   ├── __init__.py
-│   │   ├── step1_initial_pruning.py   # Variance + Correlation
-│   │   ├── step2_boruta_shap.py       # Boruta-SHAP
-│   │   └── step3_l1_regularization.py # (Embedded in models)
+│   │   ├── step1_initial_pruning.py   # Variance + Correlation filter
+│   │   └── step2_boruta_shap.py       # Boruta-SHAP (with NumPy/SciPy patches)
 │   │
-│   └── models/                        # Modeling modules
+│   ├── models/
+│   │   ├── __init__.py
+│   │   ├── propensity_matching.py     # PSM diagnostics
+│   │   ├── iptw.py                    # IPTW weights
+│   │   ├── xlearner_uplift.py         # X-Learner CATE
+│   │   ├── attrition_model.py         # Retention classifier
+│   │   ├── net_value_strategy.py      # Offer optimisation & scenarios
+│   │   └── model_registry.py          # Serialisation helpers
+│   │
+│   └── scoring/
 │       ├── __init__.py
-│       ├── propensity_matching.py     # PSM diagnostics
-│       ├── xlearner_uplift.py         # X-Learner for CATE
-│       └── attrition_model.py         # Retention classifier
+│       └── score_new_data.py          # Inference on new prospects
 │
-├── results/                           # Model outputs
-│   ├── step1_pruning_report.txt
-│   ├── step2_boruta_report.txt
-│   ├── selected_features.txt
-│   ├── cate_predictions.csv
-│   ├── retention_predictions.csv
-│   ├── combined_insights.csv
-│   ├── uplift_curves.png
-│   ├── attrition_roc_curve.png
-│   ├── attrition_pr_curve.png
-│   └── attrition_feature_importance.png
-│
+├── results/                           # All output plots and CSVs
 └── notebooks/                         # Optional exploration
-    └── exploration.ipynb
 ```
 
 ---
@@ -134,15 +160,9 @@ Ab_exam_practices/
 
 ### Installation
 
-1. **Clone the repository** (or navigate to the project directory):
-   ```bash
-   cd Ab_exam_practices
-   ```
-
-2. **Install dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
+```bash
+pip install -r requirements.txt
+```
 
 ### Run the Full Pipeline
 
@@ -151,84 +171,113 @@ python pipeline.py
 ```
 
 This will:
-1. Generate synthetic Epsilon-like data (10,000 prospects, 1,800 features)
-2. Run the 3-step sieve feature selection
-3. **Run Propensity Score Matching** diagnostics for each treatment arm
-4. Train X-Learner uplift models for each treatment
-5. Train the attrition prediction model
-6. Generate evaluation reports and visualizations
-7. Save all results to the `results/` directory
+1. Generate synthetic Epsilon-like data (20,000 prospects × 1,800 features)
+2. Run Step 1 pruning (variance + correlation)
+3. Run Step 2 Boruta-SHAP
+4. Apply bias correction (PSM / IPTW / none — set in `config.py`)
+5. Train X-Learner for CATE estimation
+6. Train attrition (retention) model
+7. Run net-value optimisation across all 4 remail × stipulation scenarios
+8. Run decile targeting analysis
+9. Save all results to `results/`
 
-**Expected runtime**: 5-15 minutes (depending on hardware)
+**Expected runtime**: 10–25 minutes (hardware dependent; reduce `BORUTA_N_TRIALS` for faster testing)
 
 ---
 
 ## 📊 Key Outputs
 
-### 1. Feature Selection Reports
-- **`step1_pruning_report.txt`**: Shows which features were removed due to low variance or high correlation
-- **`step2_boruta_report.txt`**: Lists selected features and their Boruta hit rates
-- **`selected_features.txt`**: Final list of ~100-200 features used in models
+### Feature Selection
+| File | Description |
+|------|-------------|
+| `step1_pruning_report.txt` | Features removed by variance / correlation |
+| `step2_boruta_report.txt` | Boruta accepted / tentative / rejected features |
+| `selected_features.txt` | Final feature list |
 
-### 2. Uplift Model Results
-- **`cate_predictions.csv`**: Individual-level treatment effect estimates for each prospect
-- **`uplift_curves.png`**: Cumulative gain curves showing targeting efficiency
+### PSM Diagnostics
+| File | Description |
+|------|-------------|
+| `psm_love_plot_arm{N}.png` | Love plot — |SMD| before vs. after matching |
+| `psm_propensity_overlap_before/after.png` | PS overlap histograms |
 
-### 3. Attrition Model Results
-- **`retention_predictions.csv`**: Probability of being on-book at month 9
-- **`attrition_roc_curve.png`**: ROC curve (AUC metric)
-- **`attrition_pr_curve.png`**: Precision-Recall curve
-- **`attrition_feature_importance.png`**: Top predictors of retention
+### IPTW Diagnostics
+| File | Description |
+|------|-------------|
+| `iptw_love_plot_arm{N}.png` | Love plot — |SMD| before vs. after weighting |
+| `iptw_weight_distribution.png` | Raw vs. trimmed weight histograms |
+| `iptw_balance_summary.csv` | Per-arm, per-feature weighted SMD |
+| `iptw_effective_sample_sizes.csv` | ESS per arm |
 
-### 4. Propensity Score Matching Results
-- **`propensity_balance_summary.csv`**: Per-arm, per-feature SMD before and after matching
-- **`psm_love_plot_arm1/2/3.png`**: Love plots comparing covariate balance for each arm
-- **`psm_propensity_overlap_before.png`**: PS distribution overlap before matching
-- **`psm_propensity_overlap_after.png`**: PS distribution overlap after matching
-- **`psm_covariate_balance_arm{N}.png`**: Box plots of key covariates before/after matching
+### Uplift Modeling
+| File | Description |
+|------|-------------|
+| `uplift_curves.png` | Cumulative gain curves |
+| `auuc_comparison.png` | AUUC metric comparison |
+| `cumulative_gain.png` | Gain chart |
 
-### 5. Combined Insights
-- **`combined_insights.csv`**: Master file with:
-  - Treatment assignments
-  - Actual outcomes
-  - CATE predictions for all treatments
-  - Retention probabilities
-  - Customer value scores (balance × retention)
+### Attrition Model
+| File | Description |
+|------|-------------|
+| `attrition_roc_curve.png` | ROC curve (AUC) |
+| `attrition_pr_curve.png` | Precision-Recall curve |
+| `attrition_feature_importance.png` | Top predictors |
+
+### Net Value Optimisation
+| File | Description |
+|------|-------------|
+| `optimal_offer_distribution.png` | Offer mix pie/bar chart |
+| `personalized_qini_curve.png` | Qini curve with AUUC |
+| `personalized_cumulative_net_value.png` | Cumulative NV chart |
+| `strategy_comparison_bar.png` | Personalised vs. benchmarks |
+| `scenario_comparison_bar.png` | remail × stipulation scenarios |
+| `scenario_offer_distributions.png` | Offer mix per scenario |
+| `decile_distribution.png` | Avg NV by decile |
+| `decile_vs_everyone_comparison.png` | Decile targeting vs. offer everyone |
+| `net_value_by_offer_boxplot.png` | NV distribution by assigned arm |
 
 ---
 
-## 🔧 Configuration
+## 🔧 Configuration (`config.py`)
 
-All hyperparameters and settings are centralized in **`config.py`**:
+Key settings:
 
 ```python
-# Data generation
-N_SAMPLES = 10000
+# Data
+N_SAMPLES = 20000
 N_FEATURES = 1800
 
-# Feature selection thresholds
+# Bias correction method
+BIAS_CORRECTION_METHOD = 'psm'   # 'psm' | 'iptw' | 'none'
+
+# PSM
+PSM_METHOD = 'logistic'
+PSM_CALIPER = 0.01
+USE_MATCHED_DATA_FOR_XLEARNER = False
+
+# IPTW
+IPTW_PS_METHOD = 'logistic'
+IPTW_STABILIZED = True
+IPTW_TRIM_PERCENTILE = 1.0
+
+# Feature selection
+BORUTA_N_TRIALS = 100         # Reduce for faster runs
 VARIANCE_THRESHOLD = 0.01
 CORRELATION_THRESHOLD = 0.95
 
-# Boruta parameters
-BORUTA_N_TRIALS = 100
-BORUTA_PERCENTILE = 100
+# XGBoost
+XGBOOST_PARAMS = {
+    'n_estimators': 200,
+    'max_depth': 5,
+    'reg_alpha': 10.0,        # L1 — suppresses noise features
+    'reg_lambda': 1.0,
+    ...
+}
 
-# XGBoost regularization
-XGBOOST_REG_ALPHA = 1.0  # L1 penalty
-XGBOOST_REG_LAMBDA = 1.0  # L2 penalty
-
-# Propensity Score Matching
-PSM_METHOD = 'logistic'        # 'logistic' or 'xgboost'
-PSM_CALIPER = 0.2              # Caliper width in log-odds SD units
-PSM_RANDOM_STATE = 42
-USE_MATCHED_DATA_FOR_XLEARNER = False  # Set True to train on matched data only
-PSM_KEY_COVARIATES = [         # Covariates highlighted in Love / box plots
-    'age', 'income', 'credit_score', 'num_products',
-]
+# Costs
+OFFER_COST_RATE  = 0.5        # 50% of offer dollar amount
+STIPULATION_COST = 5.0        # $5 per prospect
+REMAIL_COST      = 3.0        # $3 per prospect
 ```
-
-Modify these values to experiment with different configurations.
 
 ---
 
@@ -236,137 +285,82 @@ Modify these values to experiment with different configurations.
 
 ### Treatment Effects on Opening Balance
 ```
-Treatment           Mean Opening Balance
-─────────────────────────────────────────
-Control             $5,234
-$100 Offer          $5,345  (+$111)
-$400 Offer          $5,687  (+$453)
-$500 Offer          $5,812  (+$578)
+Arm   Treatment    Mean Opening Balance
+────────────────────────────────────────
+0     Control      $5,200
+1     $100 offer   $5,310  (+$110)
+2     $400 offer   $5,490  (+$290)
+3     $500 offer   $5,640  (+$440)
 ```
 
-### Retention Rates by Treatment
+### Retention Rates by Treatment (correct direction)
 ```
-Treatment           Month-9 On-Book Rate
-─────────────────────────────────────────
-Control             68.2%
-$100 Offer          71.5%  (+3.3 pp)
-$400 Offer          78.9%  (+10.7 pp)
-$500 Offer          82.1%  (+13.9 pp)
+Arm   Treatment    Month-9 Retention
+────────────────────────────────────────
+0     Control      ~68%
+1     $100 offer   ~63%   (−5 pp)
+2     $400 offer   ~57%   (−11 pp)
+3     $500 offer   ~52%   (−16 pp)
 ```
+*Higher offers attract more price-sensitive customers who are less likely to stay.*
 
 ### Feature Reduction
 ```
-Step                          Features
+Step                         Features
 ──────────────────────────────────────
-Original Epsilon data         1,800
-After Step 1 (Pruning)          542  (70% reduction)
-After Step 2 (Boruta-SHAP)      127  (93% reduction)
-After Step 3 (L1 in models)      ~80  (embedded selection)
+Original Epsilon data        1,800
+After Step 1 (Pruning)         ~550   (70% reduction)
+After Step 2 (Boruta-SHAP)     ~120   (93% reduction)
 ```
 
 ---
 
 ## 🧪 Testing Individual Modules
 
-Each module can be tested independently:
-
 ```bash
-# Test data generation
 python src/data_generation.py
-
-# Test Step 1 (Initial Pruning)
 python src/feature_selection/step1_initial_pruning.py
-
-# Test Step 2 (Boruta-SHAP)
 python src/feature_selection/step2_boruta_shap.py
-
-# Test Propensity Score Matching (standalone)
 python src/models/propensity_matching.py
+python src/models/iptw.py
+python src/scoring/score_new_data.py
 ```
-
----
-
-## 📚 Technical Details
-
-### Synthetic Data Characteristics
-
-The generated Epsilon-like dataset includes:
-
-- **Demographics** (~200 vars): Age, income, education, occupation, household composition
-- **Financial** (~300 vars): Credit scores, banking products, debt ratios, assets
-- **Behavioral** (~400 vars): Purchase propensities, channel preferences, online activity
-- **Geographic** (~200 vars): ZIP-level demographics, regional indicators
-- **Psychographic** (~400 vars): Modeled scores, life stages, wealth segments
-- **Noise** (~300 vars): Near-constant features and highly correlated duplicates
-
-**Outcome generation**:
-- **Opening Balance**: Heterogeneous treatment effects modeled with income interaction
-  - Lower income → $100 offer more effective
-  - Higher income → $500 offer more effective
-- **Month-9 Retention**: Driven by credit score, opening balance, and treatment assignment
-
-### Why This Approach?
-
-1. **Variance Thresholding**: Epsilon data often has "flag fields" that are constant across 99%+ of records
-2. **Correlation Filtering**: Epsilon providers duplicate variables with slight variations (e.g., "Estimated Income" vs "Estimated HH Income")
-3. **Boruta-SHAP**: Superior to traditional methods for detecting complex interactions between offers and demographics
-4. **L1 Regularization**: Ensures the final model doesn't overfit to noise, even with 100+ features
 
 ---
 
 ## 🛠️ Dependencies
 
-Core packages:
-- `causalml`: X-Learner implementation
-- `xgboost`: Gradient boosting with regularization
-- `lightgbm`: Fast tree-based models for Boruta
-- `shap`: Shapley values for feature importance
-- `BorutaShap`: Boruta algorithm with SHAP
-- `scikit-learn`: ML utilities
-- `pandas`, `numpy`: Data manipulation
-- `matplotlib`, `seaborn`: Visualization
+| Package | Purpose |
+|---------|---------|
+| `xgboost` | Gradient boosting (X-Learner base learners, attrition) |
+| `lightgbm` | Fast trees for Boruta-SHAP |
+| `shap` | SHAP importance values |
+| `BorutaShap` | Boruta algorithm (patched for NumPy 2.x + SciPy 1.12+) |
+| `scikit-learn` | PSM, IPTW, preprocessing |
+| `pandas`, `numpy` | Data manipulation |
+| `matplotlib`, `seaborn` | Visualisation |
+| `tqdm` | Progress bars (single-line in-place) |
+| `scipy` | Statistical tests (binomtest wrapper) |
 
 ---
 
-## 📖 References
+## 📚 References
 
-- **Boruta Algorithm**: Kursa, M. B., & Rudnicki, W. R. (2010). Feature selection with the Boruta package. *Journal of Statistical Software*, 36(11)
-- **SHAP Values**: Lundberg, S. M., & Lee, S. I. (2017). A unified approach to interpreting model predictions. *NeurIPS*
-- **X-Learner**: Künzel, S. R., et al. (2019). Metalearners for estimating heterogeneous treatment effects using machine learning. *PNAS*
-- **Propensity Score Matching**: Rosenbaum, P. R., & Rubin, D. B. (1983). The central role of the propensity score in observational studies for causal effects. *Biometrika*, 70(1), 41–55
-- **Love Plot / SMD**: Austin, P. C. (2011). An introduction to propensity score methods for reducing the effects of confounding in observational studies. *Multivariate Behavioral Research*, 46(3), 399–424
-- **CausalML Library**: https://causalml.readthedocs.io/
-
----
-
-## 📝 License
-
-This project is for educational and research purposes.
-
----
-
-## 👤 Author
-
-Created for bank campaign modeling and Epsilon data analysis.
-
----
-
-## 🤝 Contributing
-
-To extend this project:
-1. Add train/test splitting for proper validation
-2. Implement cross-validation in Boruta
-3. Add Qini coefficient metrics for uplift evaluation
-4. Include calibration plots for attrition model
-5. Add SHAP explanations for individual predictions
+- **Boruta Algorithm**: Kursa & Rudnicki (2010). *Journal of Statistical Software*, 36(11)
+- **SHAP Values**: Lundberg & Lee (2017). *NeurIPS*
+- **X-Learner**: Künzel et al. (2019). *PNAS*
+- **Propensity Score Matching**: Rosenbaum & Rubin (1983). *Biometrika*, 70(1)
+- **IPTW**: Robins et al. (2000). *Epidemiology*
+- **Love Plot / SMD**: Austin (2011). *Multivariate Behavioral Research*, 46(3)
 
 ---
 
 ## ⚠️ Notes
 
-- This uses **synthetic data**. For real Epsilon data, replace `data_generation.py` with your data loader
-- **Boruta-SHAP can be time-consuming** with 100 trials × 500+ features. Reduce `BORUTA_N_TRIALS` in config.py for faster testing
-- The pipeline assumes **randomized treatment assignment**. For observational data, add propensity score weighting
+- **Synthetic data only** — replace `data_generation.py` with your data loader for real Epsilon files
+- **Boruta-SHAP** can be slow; reduce `BORUTA_N_TRIALS` in `config.py` for faster testing
+- **NumPy 2.x** and **SciPy 1.12+** compatibility patches are applied automatically in `step2_boruta_shap.py` — no package edits required
+- **scikit-learn ≥ 1.5** compatibility: `multi_class='multinomial'` removed from `LogisticRegression` (now default behaviour)
 
 ---
 

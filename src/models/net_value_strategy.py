@@ -20,6 +20,12 @@ import seaborn as sns
 from scipy import integrate
 import os
 import sys
+import time
+try:
+    from tqdm import tqdm as _tqdm
+    _HAS_TQDM = True
+except ImportError:
+    _HAS_TQDM = False
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 import config
@@ -331,7 +337,16 @@ class NetValueOptimizer:
         scenario_rows   = []
         scenario_dfs    = {}
 
-        for scen_name, scenario in config.OPTIMIZATION_SCENARIOS.items():
+        scen_items = list(config.OPTIMIZATION_SCENARIOS.items())
+        scen_iter = (
+            _tqdm(scen_items, desc='  Scenarios', unit='scenario', ncols=80,
+                  bar_format='  {desc}: {percentage:3.0f}%|{bar}| '
+                              '{n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
+            if _HAS_TQDM else scen_items
+        )
+
+        for scen_name, scenario in scen_iter:
+            t_scen_start = time.time()
             scen_label = ', '.join(f"{k}={v}" for k, v in scenario.items())
             print(f"\n{'─'*60}")
             print(f"  Scenario: {scen_name}  ({scen_label})")

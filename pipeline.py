@@ -30,6 +30,7 @@ from src.models.xlearner_uplift import train_xlearner
 from src.models.attrition_model import train_attrition_model
 from src.models.net_value_strategy import optimize_offers, NetValueOptimizer
 from src.models.propensity_matching import run_propensity_matching
+from src.models.iptw import run_iptw
 from src.models.model_registry import save_pipeline
 
 
@@ -43,12 +44,27 @@ def main():
 
     start_time = time.time()
 
+    # helper ─────────────────────────────────────────────────────────
+    def _step_header(title: str, step_num: int, t_ref: float) -> float:
+        """Print a step banner and return the current time as a step clock."""
+        elapsed_total = time.time() - t_ref
+        print(f"\n{'█'*70}")
+        print(f"STEP {step_num}: {title}")
+        print(f"  (pipeline elapsed: {elapsed_total:.1f}s)")
+        print(f"{'█'*70}")
+        return time.time()
+
+    def _step_done(title: str, t_step: float) -> None:
+        """Print a step completion banner with elapsed time."""
+        elapsed = time.time() - t_step
+        print(f"\n  ✓ {title} complete  [{elapsed:.1f}s]")
+        print(f"{'─'*70}")
+    # ─────────────────────────────────────────────────────────────────
+
     # ================================================================
     # STEP 0: DATA PREPARATION
     # ================================================================
-    print("\n" + "█"*70)
-    print("STEP 0: DATA PREPARATION")
-    print("█"*70)
+    t_step = _step_header("DATA PREPARATION", 0, start_time)
 
     data_path = os.path.join(config.DATA_DIR, 'epsilon_synthetic.csv')
 
@@ -116,12 +132,12 @@ def main():
     print(f"    Stipulation=1 : {stip_col[treated_mask].sum():,}  "
           f"({100*stip_col[treated_mask].mean():.1f}%)")
 
+    _step_done("DATA PREPARATION", t_step)
+
     # ================================================================
     # STEP 1: INITIAL PRUNING
     # ================================================================
-    print("\n" + "█"*70)
-    print("SIEVE STEP 1: INITIAL PRUNING  (Variance + Correlation)")
-    print("█"*70)
+    t_step = _step_header("SIEVE STEP 1 — INITIAL PRUNING  (Variance + Correlation)", 1, start_time)
 
     step1_report_path = os.path.join(config.RESULTS_DIR, 'step1_pruning_report.txt')
     X_step1, pruner = run_initial_pruning(
@@ -131,13 +147,12 @@ def main():
         save_report_path=step1_report_path,
     )
     print(f"\n  Step 1 Complete: {X.shape[1]}  →  {X_step1.shape[1]} features")
+    _step_done("INITIAL PRUNING", t_step)
 
     # ================================================================
     # STEP 2: BORUTA-SHAP
     # ================================================================
-    print("\n" + "█"*70)
-    print("SIEVE STEP 2: BORUTA-SHAP FEATURE SELECTION")
-    print("█"*70)
+    t_step = _step_header("SIEVE STEP 2 — BORUTA-SHAP FEATURE SELECTION", 2, start_time)
 
     step2_report_path = os.path.join(config.RESULTS_DIR, 'step2_boruta_report.txt')
     X_step2, boruta = run_boruta_shap(
@@ -152,6 +167,8 @@ def main():
     for col in ['remail', 'stipulation']:
         survived = col in X_step2.columns
         print(f"  {col:>12} in selected features: {survived}")
+
+    _step_done("BORUTA-SHAP FEATURE SELECTION", t_step)
 
     # Sieve summary
     print("\n" + "="*70)
@@ -176,81 +193,114 @@ def main():
     print(f"\n  Selected features saved to: {selected_features_path}")
 
     # ================================================================
-    # STEP 2.5: PROPENSITY SCORE MATCHING (Selection Bias Check)
+    # STEP 2.5: BIAS CORRECTION  (PSM / IPTW / none)
     # ================================================================
-    print("\n" + "█"*70)
-    print("STEP 2.5: PROPENSITY SCORE MATCHING  (Selection Bias Diagnostics)")
-    print("█"*70)
-    print("\n  PSM checks whether the offer arms differ systematically in")
-    print("  pre-treatment covariates (selection bias).")
-    print("  Visual outputs: Love plots, PS overlap, covariate balance boxplots.\n")
+    bias_method = getattr(config, 'BIAS_CORRECTION_METHOD', 'psm').lower()
+    t_step = _step_header(f"BIAS CORRECTION  [{bias_method.upper()}]", '2.5', start_time)
 
-    psm = run_propensity_matching(
-        X                = X_step2,
-        treatment        = treatment,
-        save_results_dir = config.RESULTS_DIR,
-    )
+    # Initialise defaults — overridden below depending on method
+    X_for_xlearner   = X_step2
+    t_for_xlearner   = treatment
+    y_for_xlearner   = y_balance
+    sample_weight_xl = None          # IPTW weights (None → unweighted)
 
-    # Decide which dataset feeds the X-Learner
-    use_matched = getattr(config, 'USE_MATCHED_DATA_FOR_XLEARNER', False)
+    # ------------------------------------------------------------------
+    if bias_method == 'psm':
+        print("\n  PSM checks whether the offer arms differ systematically in")
+        print("  pre-treatment covariates (selection bias).")
+        print("  Visual outputs: Love plots, PS overlap, covariate balance boxplots.\n")
 
-    if use_matched:
-        print("\n  ℹ  USE_MATCHED_DATA_FOR_XLEARNER = True")
-        print("     Building combined matched dataset for X-Learner ...")
+        psm = run_propensity_matching(
+            X                = X_step2,
+            treatment        = treatment,
+            save_results_dir = config.RESULTS_DIR,
+        )
 
-        # Build combined matched feature matrix + treatment vector
-        # y must be re-aligned because matching reorders rows.
-        # Strategy: store original indices, match on X_step2, pull y from original.
-        X_step2_indexed   = X_step2.reset_index(drop=False)   # keep original idx
-        X_for_xlearner    = pd.DataFrame()
-        t_for_xlearner    = pd.Series(dtype=int)
-        y_for_xlearner    = pd.Series(dtype=float)
+        use_matched = getattr(config, 'USE_MATCHED_DATA_FOR_XLEARNER', False)
 
-        ctrl_mask_full = (np.array(treatment) == 0)
-        for arm_id, match_df in psm.matched_data.items():
-            feat_cols   = [c for c in match_df.columns if c != 'matched_binary_treatment']
-            binary_t    = match_df['matched_binary_treatment'].values
+        if use_matched:
+            print("\n  ℹ  USE_MATCHED_DATA_FOR_XLEARNER = True")
+            print("     Building combined matched dataset for X-Learner ...")
 
-            # Map binary flag back to original arm IDs
-            arm_ids_row = np.where(binary_t == 1, arm_id, 0)
+            X_for_xlearner = pd.DataFrame()
+            t_for_xlearner = pd.Series(dtype=int)
 
-            X_for_xlearner = pd.concat(
-                [X_for_xlearner, match_df[feat_cols]], ignore_index=True)
-            t_for_xlearner = pd.concat(
-                [t_for_xlearner, pd.Series(arm_ids_row)], ignore_index=True)
+            for arm_id, match_df in psm.matched_data.items():
+                feat_cols   = [c for c in match_df.columns
+                               if c != 'matched_binary_treatment']
+                binary_t    = match_df['matched_binary_treatment'].values
+                arm_ids_row = np.where(binary_t == 1, arm_id, 0)
 
-        # We cannot perfectly align y here (rows reordered); fall back to full y
-        # aligned by treatment vector
-        print("  ⚠  y_balance aligned from full dataset by treatment IDs (approximate).")
-        y_for_xlearner = y_balance.values[:len(X_for_xlearner)]
+                X_for_xlearner = pd.concat(
+                    [X_for_xlearner, match_df[feat_cols]], ignore_index=True)
+                t_for_xlearner = pd.concat(
+                    [t_for_xlearner, pd.Series(arm_ids_row)], ignore_index=True)
 
-        print(f"  Matched dataset: {len(X_for_xlearner):,} rows  "
-              f"({len(X_for_xlearner)/len(X_step2)*100:.1f}% of original)")
+            print("  ⚠  y_balance aligned from full dataset by treatment IDs (approximate).")
+            y_for_xlearner = y_balance.values[:len(X_for_xlearner)]
+
+            print(f"  Matched dataset: {len(X_for_xlearner):,} rows  "
+                  f"({len(X_for_xlearner)/len(X_step2)*100:.1f}% of original)")
+        else:
+            print("\n  ℹ  USE_MATCHED_DATA_FOR_XLEARNER = False")
+            print("     PSM diagnostics saved; X-Learner uses the full (unmatched) dataset.")
+
+        print(f"\n  PSM output files saved to: {config.RESULTS_DIR}")
+        print(f"    • psm_propensity_overlap_before.png  — PS distributions pre-match")
+        print(f"    • psm_propensity_overlap_after.png   — PS distributions post-match")
+        print(f"    • psm_love_plot_arm{{N}}.png           — Love plot / SMD per arm")
+        print(f"    • psm_covariate_balance_arm{{N}}.png   — Key covariate boxplots")
+        print(f"    • propensity_balance_summary.csv     — Full balance metrics table")
+
+    # ------------------------------------------------------------------
+    elif bias_method == 'iptw':
+        print("\n  IPTW re-weights every observation by the inverse of its")
+        print("  probability of receiving the treatment it actually received.")
+        print("  The full dataset is kept; weights are passed to the X-Learner.")
+        print(f"\n  Settings:")
+        print(f"    PS estimator     : {config.IPTW_PS_METHOD}")
+        print(f"    Stabilised       : {config.IPTW_STABILIZED}")
+        print(f"    Trim percentile  : {config.IPTW_TRIM_PERCENTILE}%  (each tail)\n")
+
+        iptw_result = run_iptw(
+            X                = X_step2,
+            treatment        = treatment,
+            save_results_dir = config.RESULTS_DIR,
+        )
+        sample_weight_xl = iptw_result.weights  # passed to train_xlearner below
+
+        print(f"\n  IPTW output files saved to: {config.RESULTS_DIR}")
+        print(f"    • iptw_weight_distribution.png   — weight histograms per arm")
+        for arm_id in sorted(k for k in config.TREATMENT_COMPONENTS if k != 0):
+            print(f"    • iptw_love_plot_arm{arm_id}.png       — weighted Love plot")
+        print(f"    • iptw_balance_summary.csv       — weighted SMD table")
+        print(f"    • iptw_effective_sample_sizes.csv — ESS per arm")
+
+    # ------------------------------------------------------------------
+    elif bias_method == 'none':
+        print("\n  ℹ  BIAS_CORRECTION_METHOD = 'none'")
+        print("     No bias correction applied.")
+        print("     X-Learner trains on the full unweighted dataset.")
+
+    # ------------------------------------------------------------------
     else:
-        print("\n  ℹ  USE_MATCHED_DATA_FOR_XLEARNER = False")
-        print("     PSM diagnostics saved; X-Learner uses the full (unmatched) dataset.")
-        X_for_xlearner = X_step2
-        t_for_xlearner = treatment
-        y_for_xlearner = y_balance
+        raise ValueError(
+            f"Unknown BIAS_CORRECTION_METHOD='{bias_method}'. "
+            f"Valid values: 'psm', 'iptw', 'none'."
+        )
 
-    print(f"\n  PSM output files saved to: {config.RESULTS_DIR}")
-    print(f"    • psm_propensity_overlap_before.png  — PS distributions pre-match")
-    print(f"    • psm_propensity_overlap_after.png   — PS distributions post-match")
-    print(f"    • psm_love_plot_arm{{N}}.png           — Love plot / SMD per arm")
-    print(f"    • psm_covariate_balance_arm{{N}}.png   — Key covariate boxplots")
-    print(f"    • propensity_balance_summary.csv     — Full balance metrics table")
+    _step_done(f"BIAS CORRECTION [{bias_method.upper()}]", t_step)
 
     # ================================================================
     # MODEL 1: X-LEARNER  (3 offer arms vs. control)
     # ================================================================
-    print("\n" + "█"*70)
-    print("MODEL 1: X-LEARNER UPLIFT  (Offer-Only Treatment)")
-    print("█"*70)
+    t_step = _step_header("MODEL 1 — X-LEARNER UPLIFT  (Offer-Only Treatment)", 3, start_time)
 
     xlearner_model, auuc_df = train_xlearner(
         X                = X_for_xlearner,
         y                = y_for_xlearner,
         treatment        = t_for_xlearner,
+        sample_weight    = sample_weight_xl,
         save_results_dir = config.RESULTS_DIR,
     )
 
@@ -260,13 +310,12 @@ def main():
     cates.to_csv(cates_path, index=False)
     print(f"\n  CATE predictions saved to: {cates_path}")
     print(f"  Columns: {list(cates.columns)}")
+    _step_done("X-LEARNER UPLIFT", t_step)
 
     # ================================================================
     # MODEL 2: ATTRITION PREDICTION
     # ================================================================
-    print("\n" + "█"*70)
-    print("MODEL 2: ATTRITION PREDICTION MODEL")
-    print("█"*70)
+    t_step = _step_header("MODEL 2 — ATTRITION PREDICTION MODEL", 4, start_time)
 
     attrition_model = train_attrition_model(
         X                = X_step2,
@@ -283,13 +332,12 @@ def main():
     retention_path = os.path.join(config.RESULTS_DIR, 'retention_predictions.csv')
     retention_df.to_csv(retention_path, index=False)
     print(f"\n  Retention predictions saved to: {retention_path}")
+    _step_done("ATTRITION PREDICTION MODEL", t_step)
 
     # ================================================================
     # COMBINED INSIGHTS
     # ================================================================
-    print("\n" + "█"*70)
-    print("COMBINED INSIGHTS: UPLIFT + RETENTION")
-    print("█"*70)
+    t_step = _step_header("COMBINED INSIGHTS: UPLIFT + RETENTION", '4b', start_time)
 
     insights = pd.DataFrame({
         'treatment':                 treatment.values,
@@ -332,28 +380,24 @@ def main():
         mean_retention       = ('retention_actual', 'mean'),
     ).round(3)
     print(summary2.to_string())
+    _step_done("COMBINED INSIGHTS", t_step)
 
     # ================================================================
     # MODEL 3: NET VALUE OPTIMIZATION  (baseline run)
     # ================================================================
-    print("\n" + "█"*70)
-    print("MODEL 3: NET VALUE OPTIMIZATION & PERSONALIZED STRATEGY")
-    print("█"*70)
+    t_step = _step_header("MODEL 3 — NET VALUE OPTIMIZATION & PERSONALIZED STRATEGY", 5, start_time)
 
     optimizer, net_value_results, strategy_comparison, qini_data, auuc_metrics = \
         optimize_offers(
             combined_insights_df = insights,
             save_results_dir     = config.RESULTS_DIR,
         )
-
-    print("\n✓ Net value optimization (baseline) complete!")
+    _step_done("NET VALUE OPTIMIZATION (baseline)", t_step)
 
     # ================================================================
     # STEP 3b: DECILE TARGETING STRATEGY
     # ================================================================
-    print("\n" + "█"*70)
-    print("STEP 3b: DECILE TARGETING STRATEGY  (top-3 deciles mailed)")
-    print("█"*70)
+    t_step = _step_header("STEP 3b — DECILE TARGETING STRATEGY  (top-3 deciles mailed)", '5b', start_time)
     print("\nUsing the optimal_net_value score from the personalised optimiser,")
     print("we rank all prospects into 10 deciles and send letters only to those")
     print("in the top 3 deciles (~30% of the population).  Performance is")
@@ -365,8 +409,7 @@ def main():
         top_n_deciles = 3,
         save_dir    = config.RESULTS_DIR,
     )
-
-    print("\n✓ Decile targeting strategy evaluation complete!")
+    _step_done("DECILE TARGETING STRATEGY", t_step)
 
     # Update comparison plots with the personalized strategy overlay
     print("\n" + "="*60)
@@ -390,9 +433,7 @@ def main():
     # ================================================================
     # STEP 4: SCENARIO ANALYSIS
     # ================================================================
-    print("\n" + "█"*70)
-    print("STEP 4: SCENARIO ANALYSIS  (remail × stipulation toggles)")
-    print("█"*70)
+    t_step = _step_header("STEP 4 — SCENARIO ANALYSIS  (remail × stipulation toggles)", 6, start_time)
     print("\nFor each scenario, counterfactual CATEs are predicted by overriding")
     print("the remail/stipulation columns in the feature matrix, then the")
     print("net-value optimizer picks the best offer with scenario-adjusted costs.\n")
@@ -410,6 +451,7 @@ def main():
             config.RESULTS_DIR, f'scenario_{scen_name}_results.csv')
         df_opt.to_csv(scen_path, index=False)
     print(f"\n  Per-scenario result CSVs saved to: {config.RESULTS_DIR}")
+    _step_done("SCENARIO ANALYSIS", t_step)
 
     # ================================================================
     # FINAL SUMMARY
@@ -525,11 +567,8 @@ def main():
     # ================================================================
     # STEP 5: SAVE MODEL PACKAGE  (for handoff / deployment)
     # ================================================================
-    print("\n" + "█"*70)
-    print("STEP 5: SAVING MODEL PACKAGE  (for handoff / deployment)")
-    print("█"*70)
-    print("\n  Serializing all pipeline artefacts to:")
-    print(f"    {config.MODELS_DIR}\n")
+    t_step = _step_header("STEP 5 — SAVING MODEL PACKAGE  (for handoff / deployment)", 7, start_time)
+    print(f"  Serializing all pipeline artefacts to: {config.MODELS_DIR}\n")
 
     save_pipeline(
         pruner          = pruner,

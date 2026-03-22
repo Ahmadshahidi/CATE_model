@@ -1,8 +1,8 @@
 ======================================================================
 UPLIFT MODELING PIPELINE — MODEL PACKAGE MANIFEST
 ======================================================================
-Generated  : 2026-03-21T16:02:17.381245
-Directory  : /home/ahmad/Ab_exam_practices/models
+Generated  : 2026-03-22T16:28:57.472130
+Directory  : /home/ahmad/CATE_Model/models
 
 ──────────────────────────────────────────────────────────────────────
 ARTEFACTS
@@ -16,21 +16,21 @@ ARTEFACTS
   Step-2 Boruta-SHAP
     File    : step2_boruta.joblib
     Details : n_trials=100, percentile=100
-            : Features selected: 4
+            : Features selected: 1
 
   X-Learner Uplift
     File    : xlearner_uplift.joblib
     Details : Arms: [1, 2, 3]
-            : Feature set size: 4
+            : Feature set size: 1
 
   Attrition Model
     File    : attrition_model.joblib
     Details : XGBClassifier — predicts P(on-book at month 9)
-            : Feature set size: 4
+            : Feature set size: 1
 
   Feature Name List
     File    : feature_names.json
-    Details : 4 features survive Steps 1+2
+    Details : 1 features survive Steps 1+2
 
   Config Snapshot
     File    : pipeline_config.json
@@ -47,7 +47,7 @@ TREATMENT / OFFER DESIGN
 ──────────────────────────────────────────────────────────────────────
 COST PARAMETERS
 ──────────────────────────────────────────────────────────────────────
-  Offer cost rate  : 0.1 (× offer $)
+  Offer cost rate  : 0.5 (× offer $)
   Stipulation cost : $5.0 per prospect
   Remail cost      : $3.0 per prospect
 

@@ -1,7 +1,4 @@
-Selected Features (4):
+Selected Features (1):
 ============================================================
 
-  noise_0158
-  noise_0256
-  remail
-  stipulation
+  investment_propensity_score

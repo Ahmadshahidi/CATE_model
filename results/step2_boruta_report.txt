@@ -5,22 +5,19 @@ STEP 2: BORUTA-SHAP FEATURE SELECTION REPORT
 n_trials   : 100
 percentile : 100
 
-  Accepted    : 2
-  Tentative   : 2  (included in output)
-  Rejected    : 1426
-  Total output: 4
+  Accepted    : 1
+  Tentative   : 0  (included in output)
+  Rejected    : 1429
+  Total output: 1
 
 ──────────────────────────────────────────────────────────────────────
 ACCEPTED FEATURES  (hit_rate > 0.5):
 ──────────────────────────────────────────────────────────────────────
-  remail                                              hit_rate=0.950
-  stipulation                                         hit_rate=0.980
+  investment_propensity_score                         hit_rate=1.000
 
 ──────────────────────────────────────────────────────────────────────
 TENTATIVE FEATURES  (included in output by default):
 ──────────────────────────────────────────────────────────────────────
-  noise_0158                                          hit_rate=0.180
-  noise_0256                                          hit_rate=0.330
 
 ──────────────────────────────────────────────────────────────────────
 REJECTED FEATURES:
@@ -33,7 +30,7 @@ REJECTED FEATURES:
   beh_0003                                            hit_rate=0.000
   beh_0005                                            hit_rate=0.000
   beh_0006                                            hit_rate=0.000
-  beh_0007                                            hit_rate=0.010
+  beh_0007                                            hit_rate=0.000
   beh_0008                                            hit_rate=0.000
   beh_0009                                            hit_rate=0.000
   beh_0011                                            hit_rate=0.000
@@ -55,7 +52,7 @@ REJECTED FEATURES:
   beh_0031                                            hit_rate=0.000
   beh_0032                                            hit_rate=0.000
   beh_0033                                            hit_rate=0.000
-  beh_0034                                            hit_rate=0.040
+  beh_0034                                            hit_rate=0.000
   beh_0035                                            hit_rate=0.000
   beh_0036                                            hit_rate=0.000
   beh_0037                                            hit_rate=0.000
@@ -132,14 +129,14 @@ REJECTED FEATURES:
   beh_0127                                            hit_rate=0.000
   beh_0128                                            hit_rate=0.000
   beh_0130                                            hit_rate=0.000
-  beh_0131                                            hit_rate=0.010
+  beh_0131                                            hit_rate=0.000
   beh_0132                                            hit_rate=0.000
   beh_0133                                            hit_rate=0.000
   beh_0134                                            hit_rate=0.000
   beh_0135                                            hit_rate=0.000
   beh_0137                                            hit_rate=0.000
   beh_0138                                            hit_rate=0.000
-  beh_0139                                            hit_rate=0.030
+  beh_0139                                            hit_rate=0.000
   beh_0140                                            hit_rate=0.000
   beh_0141                                            hit_rate=0.000
   beh_0143                                            hit_rate=0.000
@@ -154,7 +151,7 @@ REJECTED FEATURES:
   beh_0155                                            hit_rate=0.000
   beh_0157                                            hit_rate=0.000
   beh_0158                                            hit_rate=0.000
-  beh_0160                                            hit_rate=0.150
+  beh_0160                                            hit_rate=0.000
   beh_0161                                            hit_rate=0.000
   beh_0162                                            hit_rate=0.000
   beh_0163                                            hit_rate=0.000
@@ -180,7 +177,7 @@ REJECTED FEATURES:
   beh_0192                                            hit_rate=0.000
   beh_0193                                            hit_rate=0.000
   beh_0195                                            hit_rate=0.000
-  beh_0196                                            hit_rate=0.020
+  beh_0196                                            hit_rate=0.000
   beh_0199                                            hit_rate=0.000
   beh_0200                                            hit_rate=0.000
   beh_0201                                            hit_rate=0.000
@@ -598,7 +595,7 @@ REJECTED FEATURES:
   fin_0120                                            hit_rate=0.000
   fin_0121                                            hit_rate=0.000
   fin_0122                                            hit_rate=0.000
-  fin_0123                                            hit_rate=0.010
+  fin_0123                                            hit_rate=0.000
   fin_0124                                            hit_rate=0.000
   fin_0125                                            hit_rate=0.000
   fin_0126                                            hit_rate=0.000
@@ -725,7 +722,7 @@ REJECTED FEATURES:
   fin_0284                                            hit_rate=0.000
   geo_0000                                            hit_rate=0.000
   geo_0001                                            hit_rate=0.000
-  geo_0002                                            hit_rate=0.010
+  geo_0002                                            hit_rate=0.000
   geo_0003                                            hit_rate=0.000
   geo_0004                                            hit_rate=0.000
   geo_0005                                            hit_rate=0.000
@@ -886,7 +883,6 @@ REJECTED FEATURES:
   homeowner_flag                                      hit_rate=0.000
   household_size                                      hit_rate=0.000
   investment_account_indicator                        hit_rate=0.000
-  investment_propensity_score                         hit_rate=0.000
   life_stage_score                                    hit_rate=0.000
   liquid_asset_indicator                              hit_rate=0.000
   liquid_assets_estimated                             hit_rate=0.000
@@ -1020,6 +1016,7 @@ REJECTED FEATURES:
   noise_0154                                          hit_rate=0.000
   noise_0156                                          hit_rate=0.000
   noise_0157                                          hit_rate=0.000
+  noise_0158                                          hit_rate=0.000
   noise_0159                                          hit_rate=0.000
   noise_0160                                          hit_rate=0.000
   noise_0161                                          hit_rate=0.000
@@ -1096,6 +1093,7 @@ REJECTED FEATURES:
   noise_0251                                          hit_rate=0.000
   noise_0254                                          hit_rate=0.000
   noise_0255                                          hit_rate=0.000
+  noise_0256                                          hit_rate=0.000
   noise_0258                                          hit_rate=0.000
   noise_0259                                          hit_rate=0.000
   noise_0260                                          hit_rate=0.000
@@ -1445,9 +1443,11 @@ REJECTED FEATURES:
   psy_0390                                            hit_rate=0.000
   psy_0391                                            hit_rate=0.000
   psy_0394                                            hit_rate=0.000
+  remail                                              hit_rate=0.000
   retirement_account_indicator                        hit_rate=0.000
   revolving_utilization                               hit_rate=0.000
   savings_account_indicator                           hit_rate=0.000
+  stipulation                                         hit_rate=0.000
   total_debt_estimated                                hit_rate=0.000
   years_at_current_address                            hit_rate=0.000
   zip_home_value_index                                hit_rate=0.000

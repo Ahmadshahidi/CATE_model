@@ -16,6 +16,7 @@ Usage:
 
 import os
 import sys
+import time
 import warnings
 import numpy as np
 import pandas as pd
@@ -24,6 +25,11 @@ import matplotlib.gridspec as gridspec
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.neighbors import NearestNeighbors
+try:
+    from tqdm import tqdm as _tqdm
+    _HAS_TQDM = True
+except ImportError:
+    _HAS_TQDM = False
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
@@ -88,7 +94,15 @@ class PropensityScoreMatching:
         # Pre-matching global PS overlap plot
         all_ps = {}
 
-        for arm_id in arm_ids:
+        psm_iter = (
+            _tqdm(arm_ids, desc='  PSM arms', unit='arm', ncols=80,
+                  bar_format='  {desc}: {percentage:3.0f}%|{bar}| '
+                              '{n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
+            if _HAS_TQDM else arm_ids
+        )
+
+        for arm_id in psm_iter:
+            t_arm_start = time.time()
             arm_mask  = treat_arr == arm_id
             sub_mask  = ctrl_mask | arm_mask
             X_sub     = X[sub_mask].reset_index(drop=True)

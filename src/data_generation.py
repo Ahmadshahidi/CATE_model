@@ -345,34 +345,62 @@ def generate_epsilon_data() -> pd.DataFrame:
     remail[treated_mask]      = rng.binomial(1, 0.50, treated_mask.sum())
 
     # ── Outcome generation ────────────────────────────────────────
-    # Opening balance — heterogeneous CATE by income
-    # Lower income → $100 more effective (affordable debt relief);
-    # Higher income → $500 more effective (high-value incentive)
+    # Opening balance — heterogeneous CATE driven by multiple features
+    # so the optimizer will distribute offers across all three arms.
+    #
+    #   Arm 1 ($100) sweet-spot: low income + high financial stress
+    #                             + high revolving utilisation
+    #   Arm 2 ($400) sweet-spot: mid income + direct-mail responsive
+    #                             + homeowner
+    #   Arm 3 ($500) sweet-spot: high income + high net-worth
+    #                             + holds investment account
     income   = named_feats['estimated_income']
-    inc_z    = (income - income.mean()) / income.std()   # standardised income
+    inc_z    = (income - income.mean()) / income.std()
+
+    stress   = named_feats['financial_stress_index']
+    stress_z = (stress - stress.mean()) / stress.std()
+
+    util     = named_feats['revolving_utilization']
+    util_z   = (util - util.mean()) / util.std()
+
+    dm_resp  = named_feats['direct_mail_responsiveness']
+    dm_z     = (dm_resp - dm_resp.mean()) / dm_resp.std()
+
+    homeown  = named_feats['homeowner_flag'].astype(float)
+
+    nw       = named_feats['estimated_net_worth']
+    nw_z     = (nw - nw.mean()) / nw.std()
+
+    invest   = named_feats['investment_account_indicator'].astype(float)
 
     # Base balance: log-normal, mean ~$5,200
     base_balance = np.exp(rng.normal(8.56, 0.40, n)).clip(500, 50_000)
 
-    # Arm-level base effects ($ lift per treated prospect)
-    ARM_BASE_EFFECTS = {
-        0: 0,
-        1: 80  + 60  * (-inc_z),   # $100 arm: higher for low-income
-        2: 350 + 100 * inc_z,      # $400 arm: moderate income interaction
-        3: 500 + 150 * inc_z,      # $500 arm: higher for high-income
-    }
+    # Arm-level CATE: each arm favours a distinct customer segment
+    arm1_effect = (
+          70                   # base lift
+        - 80  * inc_z          # low-income → bigger response
+        + 60  * stress_z       # financially stressed → needs relief
+        + 50  * util_z         # high revolving util → responds to $100
+    )
+
+    arm2_effect = (
+          280                  # base lift
+        + 60  * dm_z           # direct-mail responsive → mid offer
+        + 80  * homeown        # homeowners value mid offer
+        - 30  * np.abs(inc_z)  # penalise extremes (mid-income sweet-spot)
+    )
+
+    arm3_effect = (
+          430                  # base lift
+        + 120 * inc_z          # high income → premium offer
+        + 100 * nw_z           # high net-worth → high-value product
+        + 80  * invest         # investment account holders respond to $500
+    )
 
     cate = np.zeros(n)
-    for arm_id in sorted(config.TREATMENT_COMPONENTS):
-        mask = treatment_arr == arm_id
-        if arm_id == 0:
-            continue
-        base_eff = ARM_BASE_EFFECTS[arm_id][mask] if hasattr(ARM_BASE_EFFECTS[arm_id], '__len__') \
-                   else np.full(mask.sum(), ARM_BASE_EFFECTS[arm_id])
-        # Correctly broadcast
-        arm_effect = np.where(treatment_arr == arm_id,
-                               ARM_BASE_EFFECTS[arm_id], 0.0)
-        cate += arm_effect
+    for arm_id, arm_eff in [(1, arm1_effect), (2, arm2_effect), (3, arm3_effect)]:
+        cate += np.where(treatment_arr == arm_id, arm_eff, 0.0)
 
     # Boost from remail and stipulation
     cate += remail      * cate * config.REMAIL_EFFECT_BOOST
@@ -380,19 +408,46 @@ def generate_epsilon_data() -> pd.DataFrame:
 
     opening_balance = (base_balance + cate + rng.normal(0, 300, n)).clip(0, None)
 
-    # on_book_month9 — driven by credit score, opening_balance, treatment
+    # on_book_month9 — driven by many covariates for a richer attrition model
     credit_z   = (named_feats['credit_score_modeled'] - 650) / 80
     balance_z  = (opening_balance - opening_balance.mean()) / opening_balance.std()
 
-    BASE_RETENTION = {0: 0.682, 1: 0.715, 2: 0.789, 3: 0.821}
+    age_arr    = named_feats['age'].astype(float)
+    age_z      = (age_arr - age_arr.mean()) / age_arr.std()
+
+    dti        = named_feats['debt_to_income_ratio']
+    dti_z      = (dti - dti.mean()) / dti.std()
+
+    # util_z already computed above (revolving_utilization)
+    # dm_z already computed above (direct_mail_responsiveness)
+    # homeown already computed above (homeowner_flag)
+    # stress_z already computed above (financial_stress_index)
+
+    chk        = named_feats['checking_account_balance_est']
+    chk_z      = (chk - chk.mean()) / (chk.std() + 1e-9)
+
+    # High-income customers receiving $500 offer have strongest negative effect
+    # (they are more selective and won't tolerate stipulation conditions)
+    income_x_arm3 = inc_z * (treatment_arr == 3).astype(float)
+
+    BASE_RETENTION = {0: 0.682, 1: 0.615, 2: 0.589, 3: 0.521}
     log_odds = (
-        np.log(0.682 / 0.318)           # intercept (control mean)
-        + 0.50 * credit_z
-        + 0.25 * balance_z
-        + np.array([{0: 0.0, 1: 0.18, 2: 0.55, 3: 0.80}[t] for t in treatment_arr])
+        np.log(0.682 / 0.318)           # intercept (control mean ~68%)
+        + 0.50 * credit_z               # better credit → stays longer
+        + 0.25 * balance_z              # higher balance → more committed
+        + np.array([{0: 0.0, 1: -0.18, 2: -0.55, 3: -0.80}[t] for t in treatment_arr])
+                                        # offer incentives → higher churn
+        + 0.15 * age_z                  # older → more stable/loyal
+        - 0.20 * dti_z                  # high DTI → financial strain → churn
+        - 0.18 * util_z                 # high revolving util → less stable
+        + 0.12 * dm_z                   # direct-mail responsive → engages more
+        + 0.10 * homeown                # homeowners → more stable
+        - 0.15 * stress_z               # financial stress → churn risk
+        + 0.08 * chk_z                  # higher checking balance → more engaged
+        - 0.12 * income_x_arm3          # high-income × $500 offer → more selective
         + 0.05 * remail
         + 0.03 * stipulation
-        + rng.normal(0, 0.20, n)
+        + rng.normal(0, 0.15, n)        # reduced noise (richer model needs less)
     )
     retention_prob  = 1 / (1 + np.exp(-log_odds))
     on_book_month9  = rng.binomial(1, retention_prob)

@@ -23,12 +23,40 @@ import time
 import warnings
 import numpy as np
 import pandas as pd
+try:
+    from tqdm import tqdm as _tqdm
+    _HAS_TQDM = True
+except ImportError:
+    _HAS_TQDM = False
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
 import config
 
 warnings.filterwarnings('ignore')
+
+
+# ---------------------------------------------------------------------------
+# scipy.stats.binom_test was removed in SciPy 1.12.
+# Patch scipy.stats so that the BorutaShap package can still import it.
+# Source: https://stackoverflow.com/a/78090496
+# ---------------------------------------------------------------------------
+import scipy.stats as _scipy_stats
+if not hasattr(_scipy_stats, 'binom_test'):
+    def _binom_test_compat(x, n=None, p=0.5, alternative='two-sided'):
+        """Thin wrapper around scipy.stats.binomtest for backwards compatibility."""
+        return _scipy_stats.binomtest(
+            k=int(x), n=int(n), p=p, alternative=alternative
+        ).pvalue
+    _scipy_stats.binom_test = _binom_test_compat
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# np.NaN was removed in NumPy 2.0; patch it back so BorutaShap can import.
+# ---------------------------------------------------------------------------
+if not hasattr(np, 'NaN'):
+    np.NaN = np.nan
+# ---------------------------------------------------------------------------
 
 
 class BorutaSHAP:
@@ -199,14 +227,28 @@ class BorutaSHAP:
 
         print(f"\n  Running custom Boruta-SHAP  ({self.n_trials} trials × {p} features) ...")
 
-        for trial in range(self.n_trials):
-            if (trial + 1) % 10 == 0:
+        if _HAS_TQDM:
+            trial_iter = _tqdm(
+                range(self.n_trials),
+                desc='  Boruta-SHAP',
+                unit='trial',
+                ncols=80,
+                leave=True,
+                dynamic_ncols=False,
+                bar_format='  {desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
+            )
+        else:
+            trial_iter = range(self.n_trials)
+
+        for trial in trial_iter:
+            if not _HAS_TQDM:
+                pct = (trial + 1) / self.n_trials * 100
                 elapsed = time.time() - t0
-                print(f"    Trial {trial+1:>3}/{self.n_trials}  "
-                      f"[{elapsed:.0f}s]  "
-                      f"hit_rate range: "
-                      f"[{hit_counts.min()/(trial+1):.2f}, "
-                      f"{hit_counts.max()/(trial+1):.2f}]")
+                sys.stdout.write(
+                    f"\r  Boruta-SHAP: {pct:5.1f}% | "
+                    f"trial {trial+1}/{self.n_trials} | {elapsed:.0f}s elapsed   "
+                )
+                sys.stdout.flush()
 
             # Shadow features: shuffle each column independently
             X_arr    = X.values
@@ -240,6 +282,10 @@ class BorutaSHAP:
 
             threshold = np.percentile(shadow_shap, self.percentile)
             hit_counts += (real_shap > threshold).astype(int)
+
+        if not _HAS_TQDM:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
 
         # Finalise
         hit_rates_arr = hit_counts / self.n_trials

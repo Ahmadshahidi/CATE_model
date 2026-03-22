@@ -86,7 +86,7 @@ OPTIMIZATION_SCENARIOS = {
 # ===========================================================
 # COST PARAMETERS
 # ===========================================================
-OFFER_COST_RATE  = 0.10   # 10% of the offer dollar amount
+OFFER_COST_RATE  = 0.5   # 10% of the offer dollar amount
 STIPULATION_COST = 5.0    # Fixed $5 per prospect when stipulation = 1
 REMAIL_COST      = 3.0    # Fixed $3 per prospect when remail = 1
 
@@ -98,6 +98,31 @@ REMAIL_COST      = 3.0    # Fixed $3 per prospect when remail = 1
 # from the predictor set.
 STIPULATION_EFFECT_BOOST = 0.10   # +10% of base offer effect
 REMAIL_EFFECT_BOOST      = 0.05   # +5% of base offer effect
+
+# ===========================================================
+# BIAS CORRECTION METHOD
+# ===========================================================
+# Selects how (if at all) selection bias is corrected before
+# training the X-Learner.
+#
+#   'psm'  → Propensity Score Matching (nearest-neighbour 1:1).
+#             PSM diagnostic plots are always saved.
+#             Set USE_MATCHED_DATA_FOR_XLEARNER = True to train
+#             the X-Learner on the matched sub-sample instead of
+#             the full dataset.
+#
+#   'iptw' → Inverse Probability of Treatment Weighting.
+#             All rows are kept; each row is re-weighted by
+#             w = P(T=t) / P(T=t | X)  (stabilised, recommended).
+#             Weights are passed as sample_weight to the X-Learner.
+#             Diagnostic plots analogous to the PSM Love plots are
+#             saved (weighted SMD, weight distributions, ESS).
+#
+#   'none' → No bias correction.  X-Learner trains on the full
+#             unweighted dataset.
+# ===========================================================
+
+BIAS_CORRECTION_METHOD = 'psm'   # 'psm' | 'iptw' | 'none'
 
 # ===========================================================
 # PROPENSITY SCORE MATCHING (PSM)
@@ -119,6 +144,30 @@ PSM_CALIPER      = 0.01          # SD units of log-odds
 PSM_RANDOM_STATE = RANDOM_SEED
 
 USE_MATCHED_DATA_FOR_XLEARNER = False  # True → train on matched data
+
+# ===========================================================
+# INVERSE PROBABILITY OF TREATMENT WEIGHTING (IPTW)
+# ===========================================================
+# Used when BIAS_CORRECTION_METHOD = 'iptw'.
+#
+# IPTW_PS_METHOD       : propensity score estimator
+#                        'logistic' → multinomial / one-vs-rest LR (fast)
+#                        'xgboost'  → one-vs-rest XGBoost (more flexible)
+# IPTW_STABILIZED      : True  → stabilised weights  w = P(T) / P(T|X)
+#                        False → raw weights          w = 1    / P(T|X)
+#                        Stabilised weights are strongly recommended;
+#                        they have the same mean as the raw weights but
+#                        lower variance.
+# IPTW_TRIM_PERCENTILE : Trim weights below this percentile and above
+#                        (100 - this percentile) to limit extreme values.
+#                        Set to 0 to disable trimming.
+# IPTW_RANDOM_STATE    : RNG seed for the PS estimator.
+# ===========================================================
+
+IPTW_PS_METHOD        = 'logistic'  # 'logistic' | 'xgboost'
+IPTW_STABILIZED       = True        # stabilised weights (recommended)
+IPTW_TRIM_PERCENTILE  = 1.0         # trim extreme weights at each tail (%)
+IPTW_RANDOM_STATE     = RANDOM_SEED
 
 # Covariates highlighted in balance plots (must survive feature selection)
 PSM_KEY_COVARIATES = [
