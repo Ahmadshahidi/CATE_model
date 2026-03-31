@@ -1,8 +1,20 @@
 ======================================================================
 UPLIFT MODELING PIPELINE — MODEL PACKAGE MANIFEST
 ======================================================================
-Generated  : 2026-03-22T16:28:57.472130
+Generated  : 2026-03-28T13:08:36.260074
 Directory  : /home/ahmad/CATE_Model/models
+
+──────────────────────────────────────────────────────────────────────
+DUAL FEATURE SELECTION PATHS
+──────────────────────────────────────────────────────────────────────
+  The pipeline runs two independent Boruta-SHAP selections after the
+  shared Step-1 variance/correlation pruning:
+
+  Balance path  → features selected against opening_balance
+                  1 features → X-Learner (CATE models + propensity)
+
+  Attrition path → features selected against on_book_month9
+                  7 features → AttritionModel (retention prob)
 
 ──────────────────────────────────────────────────────────────────────
 ARTEFACTS
@@ -11,26 +23,35 @@ ARTEFACTS
   Step-1 Pruner
     File    : step1_pruner.joblib
     Details : Variance threshold=0.01, Correlation threshold=0.95
-            : Features removed (variance): 198, (correlation): 174
+            : Removed (variance): 198, (correlation): 174
 
-  Step-2 Boruta-SHAP
-    File    : step2_boruta.joblib
+  Step-2 Boruta (Balance target)
+    File    : step2_boruta_balance.joblib
     Details : n_trials=100, percentile=100
-            : Features selected: 1
+            : Features selected: 1  → balance_feature_names.json
 
-  X-Learner Uplift
+  Step-2 Boruta (Attrition target)
+    File    : step2_boruta_attrition.joblib
+    Details : n_trials=100, percentile=100
+            : Features selected: 7  → attrition_feature_names.json
+
+  X-Learner Uplift (CatBoostRegressor)
     File    : xlearner_uplift.joblib
     Details : Arms: [1, 2, 3]
-            : Feature set size: 1
+            : Balance feature set: 1 features | Propensity: CatBoostClassifier
 
-  Attrition Model
+  Attrition Model (CatBoostClassifier)
     File    : attrition_model.joblib
-    Details : XGBClassifier — predicts P(on-book at month 9)
-            : Feature set size: 1
+    Details : Predicts P(on-book at month 9)
+            : Attrition feature set: 7 features
 
-  Feature Name List
-    File    : feature_names.json
-    Details : 1 features survive Steps 1+2
+  Balance Feature Name List
+    File    : balance_feature_names.json
+    Details : 1 features for X-Learner
+
+  Attrition Feature Name List
+    File    : attrition_feature_names.json
+    Details : 7 features for AttritionModel
 
   Config Snapshot
     File    : pipeline_config.json

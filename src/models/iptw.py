@@ -213,13 +213,52 @@ class IPTWWeighting:
         self._scaler = StandardScaler()
         X_sc = self._scaler.fit_transform(X)
 
-        if self.ps_method == 'xgboost':
+        if self.ps_method == 'catboost':
+            proba = self._catboost_ps(X, t_arr)   # uses raw X, no scaling
+        elif self.ps_method == 'xgboost':
             proba = self._xgboost_ps(X_sc, t_arr)
         else:
             proba = self._logistic_ps(X_sc, t_arr)
 
         # Ensure columns are ordered by self.arm_ids
         # sklearn's predict_proba returns columns ordered by model.classes_
+        return proba
+
+    def _catboost_ps(self, X: pd.DataFrame, t_arr: np.ndarray) -> np.ndarray:
+        """
+        Multi-class CatBoostClassifier propensity model.
+
+        Uses raw (unscaled) X — CatBoost handles feature scaling,
+        missing values, and mixed dtypes internally.  Columns are
+        reordered to match self.arm_ids before returning.
+        """
+        from catboost import CatBoostClassifier, Pool
+
+        # Map arm IDs to consecutive labels 0..K-1 for CatBoost
+        arm_map     = {arm: idx for idx, arm in enumerate(self.arm_ids)}
+        t_remapped  = np.array([arm_map[a] for a in t_arr], dtype=int)
+
+        cat_indices = [i for i, col in enumerate(X.columns)
+                       if X[col].dtype.name in ('object', 'category')]
+        pool = Pool(data=X, label=t_remapped, cat_features=cat_indices)
+
+        params = dict(config.CATBOOST_PROPENSITY_PARAMS)
+        # Multi-class IPTW: override to MultiClass objective
+        params['loss_function']  = 'MultiClass'
+        params['eval_metric']    = 'MultiClass'
+        params['classes_count']  = len(self.arm_ids)
+
+        model = CatBoostClassifier(**params)
+        model.fit(pool)
+        self._ps_model = model
+
+        proba = model.predict_proba(X)   # shape (n, K), columns = 0..K-1
+
+        for i, arm_id in enumerate(self.arm_ids):
+            ps_col = proba[:, i]
+            print(f"    Arm {arm_id} PS (CatBoost): "
+                  f"range=[{ps_col.min():.4f}, {ps_col.max():.4f}]  "
+                  f"mean={ps_col.mean():.4f}")
         return proba
 
     def _logistic_ps(self, X_sc: np.ndarray, t_arr: np.ndarray) -> np.ndarray:

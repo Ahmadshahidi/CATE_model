@@ -1,0 +1,17 @@
+{
+  "iterations": 800,
+  "depth": 4,
+  "learning_rate": 0.061721,
+  "l2_leaf_reg": 1.6667,
+  "min_data_in_leaf": 4,
+  "border_count": 244,
+  "bagging_temperature": 0.9656,
+  "eval_metric": "AUC",
+  "od_type": "Iter",
+  "od_wait": 50,
+  "random_seed": 42,
+  "thread_count": -1,
+  "verbose": false,
+  "allow_writing_files": false,
+  "nan_mode": "Min"
+}

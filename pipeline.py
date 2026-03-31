@@ -150,47 +150,87 @@ def main():
     _step_done("INITIAL PRUNING", t_step)
 
     # ================================================================
-    # STEP 2: BORUTA-SHAP
+    # STEP 2a: BORUTA-SHAP  —  Balance target  (→ X-Learner)
     # ================================================================
-    t_step = _step_header("SIEVE STEP 2 — BORUTA-SHAP FEATURE SELECTION", 2, start_time)
+    t_step = _step_header(
+        "SIEVE STEP 2a — BORUTA-SHAP  (Balance target → X-Learner)", 2, start_time)
 
-    step2_report_path = os.path.join(config.RESULTS_DIR, 'step2_boruta_report.txt')
-    X_step2, boruta = run_boruta_shap(
+    step2_balance_report_path = os.path.join(
+        config.RESULTS_DIR, 'step2_boruta_balance_report.txt')
+    X_balance, boruta_balance = run_boruta_shap(
         X_step1,
         y=y_balance,
         task='regression',
-        save_report_path=step2_report_path,
+        save_report_path=step2_balance_report_path,
     )
-    print(f"\n  Step 2 Complete: {X_step1.shape[1]}  →  {X_step2.shape[1]} features")
+    print(f"\n  Step 2a Complete (balance): "
+          f"{X_step1.shape[1]}  →  {X_balance.shape[1]} features")
 
-    # Report whether remail / stipulation survived selection
     for col in ['remail', 'stipulation']:
-        survived = col in X_step2.columns
-        print(f"  {col:>12} in selected features: {survived}")
+        print(f"  {col:>12} in balance features: {col in X_balance.columns}")
 
-    _step_done("BORUTA-SHAP FEATURE SELECTION", t_step)
+    _step_done("BORUTA-SHAP FEATURE SELECTION (balance)", t_step)
 
-    # Sieve summary
+    # ================================================================
+    # STEP 2b: BORUTA-SHAP  —  Attrition target  (→ AttritionModel)
+    # ================================================================
+    t_step = _step_header(
+        "SIEVE STEP 2b — BORUTA-SHAP  (Attrition target → AttritionModel)", '2b', start_time)
+
+    step2_attrition_report_path = os.path.join(
+        config.RESULTS_DIR, 'step2_boruta_attrition_report.txt')
+    X_attrition, boruta_attrition = run_boruta_shap(
+        X_step1,
+        y=y_attrition,
+        task='classification',
+        save_report_path=step2_attrition_report_path,
+    )
+    print(f"\n  Step 2b Complete (attrition): "
+          f"{X_step1.shape[1]}  →  {X_attrition.shape[1]} features")
+
+    for col in ['remail', 'stipulation']:
+        print(f"  {col:>12} in attrition features: {col in X_attrition.columns}")
+
+    _step_done("BORUTA-SHAP FEATURE SELECTION (attrition)", t_step)
+
+    # Sieve summary — dual Boruta paths
     print("\n" + "="*70)
-    print("3-STEP SIEVE SUMMARY")
+    print("FEATURE SELECTION SIEVE SUMMARY  (dual Boruta paths)")
     print("="*70)
-    print(f"  Original features         : {X.shape[1]:>6}")
-    print(f"  After Step 1 (Pruning)    : {X_step1.shape[1]:>6}  "
+    print(f"  Original features                    : {X.shape[1]:>6}")
+    print(f"  After Step 1 (Pruning)               : {X_step1.shape[1]:>6}  "
           f"({100*X_step1.shape[1]/X.shape[1]:.1f}%)")
-    print(f"  After Step 2 (Boruta)     : {X_step2.shape[1]:>6}  "
-          f"({100*X_step2.shape[1]/X.shape[1]:.1f}%)")
-    print(f"  Total reduction           :   "
-          f"{100*(1-X_step2.shape[1]/X.shape[1]):.1f}%")
-    print(f"  Step 3 (L1 in XGBoost)   : embedded inside models")
+    print(f"  After Step 2a (Boruta — balance)     : {X_balance.shape[1]:>6}  "
+          f"({100*X_balance.shape[1]/X.shape[1]:.1f}%)")
+    print(f"  After Step 2b (Boruta — attrition)   : {X_attrition.shape[1]:>6}  "
+          f"({100*X_attrition.shape[1]/X.shape[1]:.1f}%)")
+    print(f"  Balance total reduction              :   "
+          f"{100*(1-X_balance.shape[1]/X.shape[1]):.1f}%")
+    print(f"  Attrition total reduction            :   "
+          f"{100*(1-X_attrition.shape[1]/X.shape[1]):.1f}%")
     print("="*70)
 
-    selected_features_path = os.path.join(config.RESULTS_DIR, 'selected_features.txt')
-    with open(selected_features_path, 'w') as f:
-        f.write(f"Selected Features ({len(X_step2.columns)}):\n")
+    # Save both feature lists
+    balance_features_path = os.path.join(config.RESULTS_DIR, 'balance_selected_features.txt')
+    with open(balance_features_path, 'w') as f:
+        f.write(f"Balance Selected Features ({len(X_balance.columns)}):\n")
         f.write("="*60 + "\n\n")
-        for feat in sorted(X_step2.columns):
+        for feat in sorted(X_balance.columns):
             f.write(f"  {feat}\n")
-    print(f"\n  Selected features saved to: {selected_features_path}")
+    print(f"\n  Balance features saved to  : {balance_features_path}")
+
+    attrition_features_path = os.path.join(config.RESULTS_DIR, 'attrition_selected_features.txt')
+    with open(attrition_features_path, 'w') as f:
+        f.write(f"Attrition Selected Features ({len(X_attrition.columns)}):\n")
+        f.write("="*60 + "\n\n")
+        for feat in sorted(X_attrition.columns):
+            f.write(f"  {feat}\n")
+    print(f"  Attrition features saved to: {attrition_features_path}")
+
+    # Keep backwards-compatible alias so downstream code that references
+    # selected_features_path / X_step2 still works.
+    selected_features_path = balance_features_path
+    X_step2 = X_balance          # alias used in bias-correction and plotting
 
     # ================================================================
     # STEP 2.5: BIAS CORRECTION  (PSM / IPTW / none)
@@ -317,14 +357,16 @@ def main():
     # ================================================================
     t_step = _step_header("MODEL 2 — ATTRITION PREDICTION MODEL", 4, start_time)
 
+    # NOTE: X_attrition uses features selected against the ATTRITION target
+    # (on_book_month9) — a separate Boruta-SHAP run from the balance path.
     attrition_model = train_attrition_model(
-        X                = X_step2,
+        X                = X_attrition,
         y                = y_attrition,
         treatment        = treatment,
         save_results_dir = config.RESULTS_DIR,
     )
 
-    retention_proba = attrition_model.predict_proba(X_step2, treatment=treatment)
+    retention_proba = attrition_model.predict_proba(X_attrition, treatment=treatment)
     retention_df = pd.DataFrame({
         'retention_probability': retention_proba,
         'predicted_on_book':    (retention_proba >= 0.5).astype(int),
@@ -466,8 +508,10 @@ def main():
     print(f"\n  Key outputs:")
     print(f"    Feature selection reports  :")
     print(f"      {step1_report_path}")
-    print(f"      {step2_report_path}")
-    print(f"    Selected features          : {selected_features_path}")
+    print(f"      {step2_balance_report_path}  (balance → X-Learner)")
+    print(f"      {step2_attrition_report_path}  (attrition → retention model)")
+    print(f"    Balance selected features  : {balance_features_path}")
+    print(f"    Attrition selected features: {attrition_features_path}")
     print(f"    PSM diagnostics (Step 2.5) :")
     print(f"      {os.path.join(config.RESULTS_DIR, 'psm_propensity_overlap_before.png')}")
     print(f"      {os.path.join(config.RESULTS_DIR, 'psm_propensity_overlap_after.png')}")
@@ -571,12 +615,14 @@ def main():
     print(f"  Serializing all pipeline artefacts to: {config.MODELS_DIR}\n")
 
     save_pipeline(
-        pruner          = pruner,
-        boruta          = boruta,
-        xlearner_model  = xlearner_model,
-        attrition_model = attrition_model,
-        save_dir        = config.MODELS_DIR,
-        feature_names   = X_step2.columns.tolist(),
+        pruner                  = pruner,
+        boruta_balance          = boruta_balance,
+        boruta_attrition        = boruta_attrition,
+        xlearner_model          = xlearner_model,
+        attrition_model         = attrition_model,
+        balance_feature_names   = X_balance.columns.tolist(),
+        attrition_feature_names = X_attrition.columns.tolist(),
+        save_dir                = config.MODELS_DIR,
     )
 
     print(f"\n  To score a new prospect file:")
@@ -584,13 +630,15 @@ def main():
     print(f"        --input  data/new_prospects.csv \\")
     print(f"        --output results/scored_prospects.csv")
     print(f"\n  Model package directory : {config.MODELS_DIR}")
-    print(f"    step1_pruner.joblib       — variance + correlation pruner")
-    print(f"    step2_boruta.joblib       — Boruta-SHAP feature selector")
-    print(f"    xlearner_uplift.joblib    — X-Learner CATE models (3 arms)")
-    print(f"    attrition_model.joblib    — XGBClassifier retention predictor")
-    print(f"    feature_names.json        — {len(X_step2.columns)} selected feature names")
-    print(f"    pipeline_config.json      — cost params, arm map, decile settings")
-    print(f"    MANIFEST.txt              — human-readable package summary")
+    print(f"    step1_pruner.joblib              — variance + correlation pruner")
+    print(f"    step2_boruta_balance.joblib       — Boruta-SHAP (balance target)")
+    print(f"    step2_boruta_attrition.joblib     — Boruta-SHAP (attrition target)")
+    print(f"    xlearner_uplift.joblib            — X-Learner CATE models (3 arms)")
+    print(f"    attrition_model.joblib            — CatBoostClassifier retention predictor")
+    print(f"    balance_feature_names.json        — {len(X_balance.columns)} balance features")
+    print(f"    attrition_feature_names.json      — {len(X_attrition.columns)} attrition features")
+    print(f"    pipeline_config.json              — cost params, arm map, decile settings")
+    print(f"    MANIFEST.txt                      — human-readable package summary")
     print("\n" + "="*70 + "\n")
 
 

@@ -1,0 +1,10 @@
+Attrition Selected Features (7):
+============================================================
+
+  age
+  checking_account_balance_est
+  credit_score_modeled
+  debt_to_income_ratio
+  direct_mail_responsiveness
+  homeowner_flag
+  revolving_utilization

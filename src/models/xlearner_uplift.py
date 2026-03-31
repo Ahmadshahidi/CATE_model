@@ -4,6 +4,11 @@ X-Learner for Multi-Arm Uplift Modeling
 Estimates Conditional Average Treatment Effects (CATEs) for each offer arm
 vs. control using the X-Learner meta-learner (Künzel et al., 2019).
 
+All base learners use CatBoost, which natively handles:
+  • Categorical features — no manual encoding required
+  • Missing values       — no imputation required
+  • Unseen categories    — hash-based fallback (no KeyError at inference)
+
 X-Learner algorithm (per arm k):
   Stage 1 — Outcome models:
     µ̂₀(x)  = E[Y | X=x, T=0]        (response surface for control)
@@ -20,6 +25,7 @@ X-Learner algorithm (per arm k):
   Prediction:
     τ̂ₖ(x) = ê(x) · τ̂ₜ(x) + (1 − ê(x)) · τ̂_c(x)
     where ê(x) = propensity score = P(T=k | X=x)
+    Propensity model: CatBoostClassifier (replaces LogisticRegression)
 
 Usage:
     from src.models.xlearner_uplift import train_xlearner
@@ -36,9 +42,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from scipy import integrate
 from sklearn.model_selection import train_test_split
-from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import StandardScaler
-from xgboost import XGBRegressor
+from catboost import CatBoostRegressor, CatBoostClassifier, Pool
 try:
     from tqdm import tqdm as _tqdm
     _HAS_TQDM = True
@@ -56,27 +60,23 @@ warnings.filterwarnings('ignore')
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _build_xgb_regressor(**overrides) -> XGBRegressor:
-    """Return an XGBRegressor using config.XGBOOST_PARAMS, with optional overrides."""
-    params = dict(config.XGBOOST_PARAMS)
-    params.update(overrides)
-
-    # Apply monotone constraints if all referenced features are present — handled at fit time
-    mc = config.MONOTONE_CONSTRAINTS
-    if mc:
-        # Store separately; applied at fit time when feature names are known
-        params['_monotone_constraints'] = mc
-    return XGBRegressor(**{k: v for k, v in params.items()
-                            if not k.startswith('_')})
-
-
-def _make_monotone_tuple(feature_names: list, constraints: dict) -> tuple:
+def _get_cat_feature_indices(df: pd.DataFrame) -> list:
     """
-    Build the XGBoost ``monotone_constraints`` tuple aligned to feature order.
-    Only apply constraints for features that exist in feature_names.
+    Return column positions that CatBoost should treat as categorical.
+    Detected as object / category dtype columns.
     """
-    return tuple(
-        constraints.get(f, 0) for f in feature_names
+    return [i for i, col in enumerate(df.columns)
+            if df[col].dtype.name in ('object', 'category')]
+
+
+def _make_cb_pool(X_arr, y_arr, cat_indices, feature_names, sample_weight=None):
+    """Build a CatBoost Pool from a numpy array with proper feature names."""
+    df_tmp = pd.DataFrame(X_arr, columns=feature_names)
+    return Pool(
+        data          = df_tmp,
+        label         = y_arr,
+        cat_features  = cat_indices,
+        weight        = sample_weight,
     )
 
 
@@ -86,18 +86,25 @@ def _make_monotone_tuple(feature_names: list, constraints: dict) -> tuple:
 
 class XLearnerUplift:
     """
-    Multi-arm X-Learner with XGBoost base learners.
+    Multi-arm X-Learner with CatBoost base learners.
+
+    Outcome models (µ₀, µₖ) and CATE models (τ̂ₜ, τ̂_c) use
+    CatBoostRegressor; propensity score models use CatBoostClassifier.
+    All models receive categorical feature indices so CatBoost can
+    handle encoding and missing values internally.
 
     Attributes
     ----------
     models        : dict {arm_id: {'mu0','mu1','tau_t','tau_c','ps'}}
     feature_names : list[str]
+    cat_indices   : list[int]   indices of categorical columns
     arm_ids       : list[int]
     """
 
     def __init__(self):
         self.models        = {}
         self.feature_names = []
+        self.cat_indices   = []
         self.arm_ids       = []
 
     # ------------------------------------------------------------------
@@ -110,21 +117,22 @@ class XLearnerUplift:
 
         Parameters
         ----------
-        X             : pd.DataFrame   Boruta-SHAP selected features.
+        X             : pd.DataFrame   Boruta-SHAP selected features
+                                       (selected against the BALANCE target).
         y             : array-like     Continuous outcome (opening_balance).
         treatment     : array-like     Multi-arm treatment ID (0 = control).
         sample_weight : array-like or None
             Per-observation weights (e.g. IPTW weights).  When provided,
-            weights are passed to every XGBoost ``fit()`` call.
-            The control-arm weight array is re-used across all arms.
+            weights are passed to every CatBoost ``fit()`` call via Pool.
             If None, all weights default to 1.0 (standard, unweighted fit).
         test_size     : float          Held-out fraction for evaluation curves.
         """
         test_size = test_size or config.TEST_SIZE
         self.feature_names = X.columns.tolist()
+        self.cat_indices   = _get_cat_feature_indices(X)
         self.arm_ids       = sorted(k for k in config.TREATMENT_COMPONENTS if k != 0)
 
-        X_arr   = np.array(X)
+        X_arr   = X.values
         y_arr   = np.array(y, dtype=float)
         t_arr   = np.array(treatment, dtype=int)
 
@@ -144,14 +152,20 @@ class XLearnerUplift:
         if config.LOG_TRANSFORM_TARGET:
             y_arr = np.log1p(y_arr.clip(0))
 
+        if self.cat_indices:
+            print(f"\n  Categorical features : {len(self.cat_indices)} "
+                  f"(handled natively by CatBoost)")
+
         # ── Control outcome model (shared across arms) ────────────
         ctrl_mask = t_arr == 0
         sw_ctrl   = sw_arr[ctrl_mask] if sw_arr is not None else None
         print(f"\n  Fitting control outcome model  (n={ctrl_mask.sum():,}) ...")
         mu0 = self._fit_outcome_model(X_arr[ctrl_mask], y_arr[ctrl_mask],
-                                       self.feature_names,
                                        sample_weight=sw_ctrl)
-        mu0_pred_all = self._predict_outcome(mu0, X_arr, self.feature_names)
+        mu0_pred_all = mu0.predict(
+            _make_cb_pool(X_arr, None, self.cat_indices,
+                          self.feature_names)
+        )
 
         # ── Per-arm X-Learner ─────────────────────────────────────
         arm_iter = (
@@ -177,9 +191,10 @@ class XLearnerUplift:
 
             # Stage 1 — treated outcome model
             print(f"    [1/4] Fitting treated outcome model (µ₁) ...")
-            mu1 = self._fit_outcome_model(X_t, y_t, self.feature_names,
-                                           sample_weight=sw_t)
-            mu1_pred_ctrl = self._predict_outcome(mu1, X_c, self.feature_names)
+            mu1 = self._fit_outcome_model(X_t, y_t, sample_weight=sw_t)
+            mu1_pred_ctrl = mu1.predict(
+                _make_cb_pool(X_c, None, self.cat_indices, self.feature_names)
+            )
 
             # Stage 2 — pseudo-outcomes
             print(f"    [2/4] Computing CATE pseudo-outcomes ...")
@@ -193,14 +208,12 @@ class XLearnerUplift:
 
             # Stage 3 — CATE models
             print(f"    [3/4] Fitting CATE models (τ_t, τ_c) ...")
-            tau_t = self._fit_cate_model(X_t, D_tilde_treated, self.feature_names,
-                                          sample_weight=sw_t)
-            tau_c = self._fit_cate_model(X_c, D_tilde_control, self.feature_names,
-                                          sample_weight=sw_c)
+            tau_t = self._fit_cate_model(X_t, D_tilde_treated, sample_weight=sw_t)
+            tau_c = self._fit_cate_model(X_c, D_tilde_control, sample_weight=sw_c)
 
-            # Propensity score (used to blend τ_t and τ_c)
-            print(f"    [4/4] Fitting propensity score model ...")
-            ps_model, ps_scaler = self._fit_propensity(X_arr, (t_arr == arm_id).astype(int))
+            # Propensity score (CatBoostClassifier — used to blend τ_t and τ_c)
+            print(f"    [4/4] Fitting propensity score model (CatBoostClassifier) ...")
+            ps_model = self._fit_propensity(X_arr, (t_arr == arm_id).astype(int))
 
             self.models[arm_id] = {
                 'mu0':      mu0,
@@ -208,11 +221,10 @@ class XLearnerUplift:
                 'tau_t':    tau_t,
                 'tau_c':    tau_c,
                 'ps_model': ps_model,
-                'ps_scaler':ps_scaler,
             }
 
             # Quick diagnostic
-            cate_all = self._predict_cate_for_arm(arm_id, X_arr, self.feature_names)
+            cate_all = self._predict_cate_for_arm(arm_id, X_arr)
             arm_elapsed = time.time() - t_arm_start
             print(f"    CATE diagnostics: mean={cate_all.mean():+.2f}  "
                   f"median={np.median(cate_all):+.2f}  "
@@ -240,7 +252,7 @@ class XLearnerUplift:
         X_arr  = X[self.feature_names].values
         result = {}
         for arm_id in self.arm_ids:
-            cate = self._predict_cate_for_arm(arm_id, X_arr, self.feature_names)
+            cate = self._predict_cate_for_arm(arm_id, X_arr)
             if config.LOG_TRANSFORM_TARGET:
                 cate = np.expm1(cate)
             result[f'cate_treatment_{arm_id}'] = cate
@@ -250,10 +262,6 @@ class XLearnerUplift:
         """
         Predict CATEs after overriding remail / stipulation columns
         with the values in ``scenario``.
-
-        This produces *counterfactual* CATEs, i.e. what the uplift
-        would be if remail / stipulation were set as in the scenario
-        for all prospects.
 
         Parameters
         ----------
@@ -346,7 +354,6 @@ class XLearnerUplift:
         y_arr  = np.array(y, dtype=float)
         t_arr  = np.array(treatment, dtype=int)
         arm_ids = self.arm_ids
-        n_arms  = len(arm_ids)
         cmap    = plt.get_cmap('tab10')
 
         fig, axes = plt.subplots(1, 2, figsize=(14, 6))
@@ -452,6 +459,81 @@ class XLearnerUplift:
             print(f"  AUUC comparison chart saved to: {save_path}")
         plt.close()
 
+    def plot_feature_importance(self, save_dir: str, top_n: int = 30):
+        """
+        Horizontal bar chart of average feature importance across all
+        CATE models (tau_t + tau_c for every arm) and the shared
+        control outcome model (mu0).
+
+        Mirrors attrition_feature_importance.png in style.
+        Saved as: <save_dir>/balance_feature_importance.png
+        """
+        importance_sums = np.zeros(len(self.feature_names))
+        model_count = 0
+
+        for arm_id, arm_models in self.models.items():
+            for key in ('mu1', 'tau_t', 'tau_c'):
+                m = arm_models.get(key)
+                if m is not None:
+                    try:
+                        imp = m.get_feature_importance()
+                        # Some CatBoost versions return per-class arrays for
+                        # classifiers; squeeze to 1-D if needed.
+                        if imp.ndim > 1:
+                            imp = imp.mean(axis=0)
+                        importance_sums += imp
+                        model_count += 1
+                    except Exception:
+                        pass
+
+        # Also include the shared mu0 (control outcome model)
+        first_arm = next(iter(self.models.values()), None)
+        if first_arm is not None and 'mu0' in first_arm:
+            try:
+                imp = first_arm['mu0'].get_feature_importance()
+                if imp.ndim > 1:
+                    imp = imp.mean(axis=0)
+                importance_sums += imp
+                model_count += 1
+            except Exception:
+                pass
+
+        if model_count == 0:
+            print("  ⚠  No feature importance data available from X-Learner models.")
+            return
+
+        avg_importance = importance_sums / model_count
+
+        imp_df = (
+            pd.DataFrame({
+                'feature':    self.feature_names,
+                'importance': avg_importance,
+            })
+            .sort_values('importance', ascending=False)
+            .head(top_n)
+            .sort_values('importance', ascending=True)
+        )
+
+        fig, ax = plt.subplots(figsize=(10, max(6, len(imp_df) * 0.35)))
+        colors = plt.cm.viridis(np.linspace(0.3, 0.9, len(imp_df)))
+        ax.barh(imp_df['feature'], imp_df['importance'], color=colors)
+        ax.set_xlabel(
+            'Average Feature Importance (CatBoost PredictionValuesChange)',
+            fontsize=11,
+        )
+        ax.set_title(
+            f'Balance Model (X-Learner) — Top {min(top_n, len(imp_df))} Features',
+            fontsize=13, fontweight='bold',
+        )
+        ax.grid(True, alpha=0.3, axis='x')
+        plt.tight_layout()
+
+        os.makedirs(save_dir, exist_ok=True)
+        path = os.path.join(save_dir, 'balance_feature_importance.png')
+        plt.savefig(path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"  Balance feature importance saved to: {path}")
+
     def plot_cumulative_gain(self, X: pd.DataFrame, y, treatment,
                               net_value_qini_data: dict = None,
                               save_path: str = None):
@@ -478,7 +560,6 @@ class XLearnerUplift:
             ax.plot(pcts, cum_gain, lw=2, color=cmap(i),
                     label=config.TREATMENTS[arm_id])
 
-        # Random baseline (diagonal)
         ax.plot([0, 100], [0, 100], '--', color='grey', alpha=0.6,
                 label='Random baseline')
 
@@ -504,63 +585,63 @@ class XLearnerUplift:
     # Internal model helpers
     # ------------------------------------------------------------------
     def _fit_outcome_model(self, X_arr: np.ndarray, y_arr: np.ndarray,
-                            feature_names: list,
-                            sample_weight=None) -> XGBRegressor:
-        """Fit Stage-1 outcome model, optionally with IPTW sample weights."""
-        model = XGBRegressor(**{k: v for k, v in config.XGBOOST_PARAMS.items()})
-
-        mc = config.MONOTONE_CONSTRAINTS
-        if mc:
-            mono_tuple = _make_monotone_tuple(feature_names, mc)
-            if any(v != 0 for v in mono_tuple):
-                model = XGBRegressor(
-                    **{k: v for k, v in config.XGBOOST_PARAMS.items()},
-                    monotone_constraints=mono_tuple,
-                )
-
-        model.fit(X_arr, y_arr, sample_weight=sample_weight, verbose=False)
+                            sample_weight=None) -> CatBoostRegressor:
+        """
+        Fit Stage-1 outcome model using CatBoostRegressor.
+        Handles categorical features and missing values natively.
+        """
+        pool = _make_cb_pool(X_arr, y_arr, self.cat_indices,
+                             self.feature_names, sample_weight=sample_weight)
+        model = CatBoostRegressor(**config.CATBOOST_REGRESSOR_PARAMS)
+        model.fit(pool)
         return model
 
-    def _predict_outcome(self, model: XGBRegressor,
-                          X_arr: np.ndarray,
-                          feature_names: list) -> np.ndarray:
-        return model.predict(X_arr)
-
     def _fit_cate_model(self, X_arr: np.ndarray, D_tilde: np.ndarray,
-                         feature_names: list,
-                         sample_weight=None) -> XGBRegressor:
-        """Fit Stage-3 CATE model on pseudo-outcomes, optionally with IPTW weights."""
-        model = XGBRegressor(**{k: v for k, v in config.XGBOOST_PARAMS.items()})
-        model.fit(X_arr, D_tilde, sample_weight=sample_weight, verbose=False)
+                         sample_weight=None) -> CatBoostRegressor:
+        """
+        Fit Stage-3 CATE model on pseudo-outcomes using CatBoostRegressor.
+        CATE pseudo-outcomes can be negative; RMSE objective is used.
+        """
+        pool = _make_cb_pool(X_arr, D_tilde, self.cat_indices,
+                             self.feature_names, sample_weight=sample_weight)
+        model = CatBoostRegressor(**config.CATBOOST_REGRESSOR_PARAMS)
+        model.fit(pool)
         return model
 
     def _fit_propensity(self, X_arr: np.ndarray,
-                         t_binary: np.ndarray) -> tuple:
-        """Logistic regression propensity score model."""
-        scaler = StandardScaler()
-        X_sc   = scaler.fit_transform(X_arr)
-        lr     = LogisticRegression(
-            max_iter=500, C=1.0, random_state=config.RANDOM_SEED,
-            solver='lbfgs', n_jobs=-1,
-        )
-        lr.fit(X_sc, t_binary)
-        return lr, scaler
+                         t_binary: np.ndarray) -> CatBoostClassifier:
+        """
+        Fit a CatBoostClassifier propensity score model P(T=k | X).
 
-    def _predict_cate_for_arm(self, arm_id: int,
-                               X_arr: np.ndarray,
-                               feature_names: list) -> np.ndarray:
-        """Blend τ_t and τ_c using propensity score."""
+        Replaces the previous LogisticRegression + StandardScaler approach.
+        CatBoost handles categoricals and missings natively — no scaling
+        or encoding step is needed before training.
+
+        Returns
+        -------
+        CatBoostClassifier  (fitted)
+        """
+        pool = _make_cb_pool(X_arr, t_binary.astype(int),
+                             self.cat_indices, self.feature_names)
+        model = CatBoostClassifier(**config.CATBOOST_PROPENSITY_PARAMS)
+        model.fit(pool)
+        return model
+
+    def _predict_cate_for_arm(self, arm_id: int, X_arr: np.ndarray) -> np.ndarray:
+        """
+        Blend τ_t and τ_c using the propensity score.
+
+          τ̂(x) = ê(x) · τ̂ₜ(x) + (1 − ê(x)) · τ̂_c(x)
+        """
         m      = self.models[arm_id]
-        ps_scaler = m['ps_scaler']
-        ps_model  = m['ps_model']
-        tau_t     = m['tau_t']
-        tau_c     = m['tau_c']
+        tau_t  = m['tau_t']
+        tau_c  = m['tau_c']
+        ps_mdl = m['ps_model']
 
-        X_sc = ps_scaler.transform(X_arr)
-        e_x  = ps_model.predict_proba(X_sc)[:, 1].clip(0.05, 0.95)
-
-        tau_t_pred = tau_t.predict(X_arr)
-        tau_c_pred = tau_c.predict(X_arr)
+        pool     = _make_cb_pool(X_arr, None, self.cat_indices, self.feature_names)
+        e_x      = ps_mdl.predict_proba(pool)[:, 1].clip(0.05, 0.95)
+        tau_t_pred = tau_t.predict(pool)
+        tau_c_pred = tau_c.predict(pool)
 
         return e_x * tau_t_pred + (1 - e_x) * tau_c_pred
 
@@ -579,12 +660,13 @@ def train_xlearner(X: pd.DataFrame,
 
     Parameters
     ----------
-    X                : pd.DataFrame   Boruta-SHAP selected features.
+    X                : pd.DataFrame   Boruta-SHAP selected features
+                                      (selected against the BALANCE target).
     y                : array-like     Continuous outcome (opening_balance).
     treatment        : array-like     Multi-arm treatment IDs.
     sample_weight    : array-like or None
-        Per-observation IPTW weights.  Passed directly to XGBoost
-        ``fit()`` at every stage.  None → unweighted (default).
+        Per-observation IPTW weights.  Passed directly to CatBoost
+        Pool at every stage.  None → unweighted (default).
     save_results_dir : str            If provided, save charts and CSVs here.
 
     Returns
@@ -594,13 +676,13 @@ def train_xlearner(X: pd.DataFrame,
         auuc_df        : pd.DataFrame    AUUC metrics per arm
     """
     print("\n" + "="*60)
-    print("X-LEARNER UPLIFT MODEL TRAINING")
+    print("X-LEARNER UPLIFT MODEL TRAINING  (CatBoost base learners)")
     print("="*60)
     bias_method = getattr(config, 'BIAS_CORRECTION_METHOD', 'none')
     print(f"\n  Bias correction  : {bias_method.upper()}")
     print(f"  Weighted fit     : {'Yes (IPTW)' if sample_weight is not None else 'No'}")
     print(f"\n  Samples  : {len(X):,}")
-    print(f"  Features : {X.shape[1]}")
+    print(f"  Features : {X.shape[1]}  (balance-target Boruta selection)")
     arm_counts = pd.Series(treatment).value_counts().sort_index()
     for arm_id, cnt in arm_counts.items():
         print(f"  Arm {arm_id} ({config.TREATMENTS.get(arm_id, arm_id):<10}): {cnt:>6,}")
@@ -624,12 +706,10 @@ def train_xlearner(X: pd.DataFrame,
     if save_results_dir:
         os.makedirs(save_results_dir, exist_ok=True)
 
-        # AUUC CSV
         auuc_path = os.path.join(save_results_dir, 'auuc_metrics.csv')
         auuc_df.to_csv(auuc_path, index=False)
         print(f"\n  AUUC metrics saved to: {auuc_path}")
 
-        # Plots
         xlearner.plot_uplift_curves(
             X, y, treatment,
             save_path=os.path.join(save_results_dir, 'uplift_curves.png'),
@@ -642,6 +722,7 @@ def train_xlearner(X: pd.DataFrame,
             X, y, treatment,
             save_path=os.path.join(save_results_dir, 'cumulative_gain.png'),
         )
+        xlearner.plot_feature_importance(save_dir=save_results_dir)
 
     print("="*60 + "\n")
     return xlearner, auuc_df
@@ -657,7 +738,8 @@ if __name__ == "__main__":
     exc = ['treatment', 'treatment_name', 'opening_balance', 'on_book_month9', 'offer']
     X   = df[[c for c in df.columns if c not in exc]]
     X1, _ = run_initial_pruning(X)
-    X2, _ = run_boruta_shap(X1, df['opening_balance'])
+    # Balance-target Boruta for X-Learner
+    X2, _ = run_boruta_shap(X1, df['opening_balance'], task='regression')
     model, auuc = train_xlearner(X2, df['opening_balance'],
                                   df['treatment'],
                                   save_results_dir=config.RESULTS_DIR)

@@ -153,7 +153,9 @@ class PropensityScoreMatching:
         scaler = StandardScaler()
         X_sc   = scaler.fit_transform(X_sub)
 
-        if self.method == 'xgboost':
+        if self.method == 'catboost':
+            ps = self._catboost_ps(X_sub, t_sub, arm_id)
+        elif self.method == 'xgboost':
             try:
                 from xgboost import XGBClassifier
                 model = XGBClassifier(
@@ -175,6 +177,30 @@ class PropensityScoreMatching:
         self._ps_models[arm_id] = (scaler, None)   # store scaler for later
         print(f"    PS range: [{ps.min():.3f}, {ps.max():.3f}]  "
               f"mean={ps.mean():.3f}")
+        return ps
+
+    def _catboost_ps(self, X_sub: pd.DataFrame,
+                     t_sub: np.ndarray, arm_id: int) -> np.ndarray:
+        """
+        Binary CatBoostClassifier propensity model (arm vs. control).
+
+        Uses raw (unscaled) X_sub — CatBoost handles feature scaling,
+        missing values, and mixed dtypes internally.  No StandardScaler
+        is applied before this method.
+        """
+        from catboost import CatBoostClassifier, Pool
+
+        cat_indices = [i for i, col in enumerate(X_sub.columns)
+                       if X_sub[col].dtype.name in ('object', 'category')]
+        pool = Pool(data=X_sub, label=t_sub.astype(int),
+                    cat_features=cat_indices)
+
+        params = dict(config.CATBOOST_PROPENSITY_PARAMS)
+        model = CatBoostClassifier(**params)
+        model.fit(pool)
+        self._ps_models[arm_id] = (None, model)   # no scaler needed
+
+        ps = model.predict_proba(X_sub)[:, 1]
         return ps
 
     def _logistic_ps(self, X_sc: np.ndarray, t: np.ndarray) -> np.ndarray:

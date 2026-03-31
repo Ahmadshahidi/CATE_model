@@ -132,14 +132,23 @@ BIAS_CORRECTION_METHOD = 'psm'   # 'psm' | 'iptw' | 'none'
 # matched data can optionally replace the full dataset for the
 # X-Learner.
 #
-# PSM_METHOD       : 'logistic' (fast) or 'xgboost' (more flexible)
-# PSM_CALIPER      : max allowed difference in propensity score
-#                    (in SD units of the log-odds score)
-# USE_MATCHED_DATA : if True, X-Learner trains on PSM-matched data
-# PSM_KEY_COVARIATES: highlighted in covariate balance plots
+# PSM_METHOD  : propensity score estimator used for matching.
+#   'catboost'  → CatBoostClassifier (recommended — handles
+#                 mixed/missing data natively, no scaling needed,
+#                 consistent with the X-Learner's base learners)
+#   'logistic'  → Logistic Regression (fast fallback; requires
+#                 scaling and cannot handle missing values)
+#   'xgboost'   → XGBoost binary classifier (flexible, requires
+#                 xgboost package)
+#
+# PSM_CALIPER : max allowed difference in propensity score
+#               (in SD units of the log-odds score)
+# USE_MATCHED_DATA_FOR_XLEARNER : if True, X-Learner trains on
+#               PSM-matched data instead of the full dataset.
+# PSM_KEY_COVARIATES : highlighted in covariate balance plots.
 # ===========================================================
 
-PSM_METHOD       = 'logistic'   # 'logistic' | 'xgboost'
+PSM_METHOD       = 'catboost'   # 'catboost' | 'logistic' | 'xgboost'
 PSM_CALIPER      = 0.01          # SD units of log-odds
 PSM_RANDOM_STATE = RANDOM_SEED
 
@@ -150,23 +159,27 @@ USE_MATCHED_DATA_FOR_XLEARNER = False  # True → train on matched data
 # ===========================================================
 # Used when BIAS_CORRECTION_METHOD = 'iptw'.
 #
-# IPTW_PS_METHOD       : propensity score estimator
-#                        'logistic' → multinomial / one-vs-rest LR (fast)
-#                        'xgboost'  → one-vs-rest XGBoost (more flexible)
-# IPTW_STABILIZED      : True  → stabilised weights  w = P(T) / P(T|X)
-#                        False → raw weights          w = 1    / P(T|X)
-#                        Stabilised weights are strongly recommended;
-#                        they have the same mean as the raw weights but
-#                        lower variance.
-# IPTW_TRIM_PERCENTILE : Trim weights below this percentile and above
-#                        (100 - this percentile) to limit extreme values.
-#                        Set to 0 to disable trimming.
-# IPTW_RANDOM_STATE    : RNG seed for the PS estimator.
+# IPTW_PS_METHOD : propensity score estimator for IPTW weights.
+#   'catboost'  → CatBoostClassifier (recommended — handles
+#                 mixed/missing data natively, consistent with
+#                 the X-Learner's base learners)
+#   'logistic'  → Multinomial / one-vs-rest LR (fast fallback)
+#   'xgboost'   → One-vs-rest XGBoost (flexible; requires xgboost)
+#
+# IPTW_STABILIZED : True  → stabilised weights  w = P(T) / P(T|X)
+#                   False → raw weights          w = 1    / P(T|X)
+#                   Stabilised weights are strongly recommended;
+#                   they have the same mean as raw weights but
+#                   lower variance.
+# IPTW_TRIM_PERCENTILE : Trim weights below this percentile and
+#                        above (100 - this percentile) to limit
+#                        extreme values.  Set to 0 to disable.
+# IPTW_RANDOM_STATE : RNG seed for the PS estimator.
 # ===========================================================
 
-IPTW_PS_METHOD        = 'logistic'  # 'logistic' | 'xgboost'
-IPTW_STABILIZED       = True        # stabilised weights (recommended)
-IPTW_TRIM_PERCENTILE  = 1.0         # trim extreme weights at each tail (%)
+IPTW_PS_METHOD        = 'catboost'  # 'catboost' | 'logistic' | 'xgboost'
+IPTW_STABILIZED       = True         # stabilised weights (recommended)
+IPTW_TRIM_PERCENTILE  = 1.0          # trim extreme weights at each tail (%)
 IPTW_RANDOM_STATE     = RANDOM_SEED
 
 # Covariates highlighted in balance plots (must survive feature selection)
@@ -195,13 +208,59 @@ BORUTA_RANDOM_STATE  = RANDOM_SEED
 # ===========================================================
 
 # -----------------------------------------------------------
-# Log-transform toggle
-#   True  → y = np.log1p(y) before fitting the X-Learner;
-#            CATE predictions are back-transformed via np.expm1()
-#            so all downstream code still works in dollar-space.
-#   False → raw target, no transformation.
+# Log-transform toggle  (IMPORTANT for skewed balance targets)
 # -----------------------------------------------------------
-LOG_TRANSFORM_TARGET = False   # squarederror objective handles negative CATE pseudo-outcomes directly
+# Opening balance is heavily right-skewed in real data:
+#   ~90% of prospects have balances < $10,000, while the top
+#   ~10% account for ~92% of total balance volume.
+#
+# How CatBoost handles skewness:
+#   • Symmetric-tree splits partition the feature space without
+#     assuming Gaussian errors, so CatBoost is more robust to
+#     outliers than linear models.
+#   • Leaf-wise L2 regularisation (l2_leaf_reg) naturally shrinks
+#     leaf values toward the mean, dampening extreme predictions.
+#   • However, with RMSE as the objective, very large balances
+#     dominate the loss and the model may over-fit to the top
+#     decile while under-representing treatment effects for
+#     lower-balance prospects.
+#
+# Recommended settings for production data with extreme skew:
+#
+#   Option 1 — LOG TRANSFORM (recommended for severe skew)
+#     Set LOG_TRANSFORM_TARGET = True.
+#     y → log1p(y) before fitting; CATEs are back-transformed
+#     via expm1() automatically.  Benefits:
+#       - Compresses the tail; RMSE loss treats all balance
+#         levels more equally.
+#       - CATE pseudo-outcomes become approximately symmetric,
+#         improving CATE model fit.
+#       - Avoids one large outlier dominating the gradients.
+#     Caveat: CATE is estimated on the log scale and then
+#       back-transformed, which gives a *multiplicative* effect;
+#       interpret as "% lift" rather than "$ lift" until
+#       converted back.
+#
+#   Option 2 — WINSORISING (alternative or complement)
+#     Clip y at a high percentile (e.g. 99th) before fitting,
+#     or use CatBoost's built-in quantile/MAE objective:
+#       CATBOOST_REGRESSOR_PARAMS['loss_function'] = 'Quantile:alpha=0.9'
+#     This directly optimises the median/high-quantile effect
+#     rather than the mean.
+#
+#   Option 3 — RAW TARGET with increased regularisation (current)
+#     Set LOG_TRANSFORM_TARGET = False and rely on CatBoost's
+#     robust tree splits + l2_leaf_reg.  Safe for moderate skew;
+#     may under-fit the bulk of lower-balance prospects when
+#     skew is extreme (top-10% / 92% of volume scenario).
+#
+# For production deployment, consider:
+#   1. Enabling LOG_TRANSFORM_TARGET = True  (best general choice)
+#   2. Raising l2_leaf_reg to 5–10 in CATBOOST_REGRESSOR_PARAMS
+#   3. Evaluating CATE calibration separately for low-balance
+#      and high-balance cohorts (e.g. by decile of opening_balance)
+# -----------------------------------------------------------
+LOG_TRANSFORM_TARGET = False   # Set True for heavily right-skewed production balances
 
 # -----------------------------------------------------------
 # Monotonic constraints for Epsilon wealth features.
@@ -216,23 +275,81 @@ MONOTONE_CONSTRAINTS = {
 }
 
 # -----------------------------------------------------------
-# XGBoost base learner parameters
+# XGBoost base learner parameters (kept for reference / fallback)
 #   All keys are passed directly to XGBRegressor(**XGBOOST_PARAMS).
-#   Edit any value here; the model code reads from this dict.
 # -----------------------------------------------------------
 XGBOOST_PARAMS = {
-    # reg:squarederror is required here because the X-Learner's
-    # second-stage models fit on CATE pseudo-outcomes which can be
-    # negative. Tweedie/Poisson objectives require non-negative labels.
     'objective':    'reg:squarederror',
     'n_estimators': 200,
     'max_depth':    5,
     'learning_rate': 0.05,
-    'reg_alpha':    10.0,   # L1 — suppresses noise features
-    'reg_lambda':   1.0,    # L2
+    'reg_alpha':    10.0,
+    'reg_lambda':   1.0,
     'subsample':    0.7,
     'random_state': RANDOM_SEED,
     'n_jobs':       -1,
+}
+
+# -----------------------------------------------------------
+# CatBoost — Attrition / retention classifier
+#   Used in AttritionModel (src/models/attrition_model.py).
+#   CatBoost handles categorical features and missing values
+#   natively; no pre-encoding or imputation is required.
+# -----------------------------------------------------------
+CATBOOST_CLASSIFIER_PARAMS = {
+    'iterations':        800,
+    'depth':             6,
+    'learning_rate':     0.05,
+    'l2_leaf_reg':       3.0,
+    'eval_metric':       'AUC',
+    'od_type':           'Iter',         # early stopping criterion
+    'od_wait':           50,             # patience (iterations)
+    'random_seed':       RANDOM_SEED,
+    'thread_count':      -1,
+    'verbose':           False,
+    'allow_writing_files': False,
+    # nan_mode='Min' treats missing values as below any observed value
+    # (safe default for mixed financial/demographic data)
+    'nan_mode':          'Min',
+}
+
+# -----------------------------------------------------------
+# CatBoost — X-Learner outcome & CATE regressors
+#   Used for µ₀, µₖ, τ̂ₜ, τ̂_c in XLearnerUplift.
+#   CATE pseudo-outcomes can be negative → use RMSE objective.
+# -----------------------------------------------------------
+CATBOOST_REGRESSOR_PARAMS = {
+    'iterations':        600,
+    'depth':             6,
+    'learning_rate':     0.05,
+    'l2_leaf_reg':       3.0,
+    'eval_metric':       'RMSE',
+    'od_type':           'Iter',
+    'od_wait':           50,
+    'random_seed':       RANDOM_SEED,
+    'thread_count':      -1,
+    'verbose':           False,
+    'allow_writing_files': False,
+    'nan_mode':          'Min',
+}
+
+# -----------------------------------------------------------
+# CatBoost — Propensity score classifier (inside X-Learner)
+#   Used to estimate P(T=k | X) for blending τ̂ₜ / τ̂_c.
+# -----------------------------------------------------------
+CATBOOST_PROPENSITY_PARAMS = {
+    'iterations':        400,
+    'depth':             5,
+    'learning_rate':     0.05,
+    'l2_leaf_reg':       3.0,
+    'eval_metric':       'AUC',
+    'od_type':           'Iter',
+    'od_wait':           40,
+    'random_seed':       RANDOM_SEED,
+    'thread_count':      -1,
+    'verbose':           False,
+    'allow_writing_files': False,
+    'nan_mode':          'Min',
 }
 
 # Train-Test Split

@@ -4,6 +4,17 @@ Standalone Scoring Script — Score New Prospects for Letter-of-Offer Campaign
 Loads the serialized model package from ``models/`` and applies the full
 inference pipeline to a CSV of new prospects.
 
+Two separate feature sets are now used at inference time:
+  • balance_feature_names   — features selected against opening_balance
+                              → fed to the X-Learner (CATE prediction)
+  • attrition_feature_names — features selected against on_book_month9
+                              → fed to the AttritionModel (retention prob)
+
+All models (X-Learner, AttritionModel, propensity) are CatBoost-based and
+handle categorical features and missing values natively.  No pre-encoding
+or imputation is required; unseen categorical levels are handled via
+CatBoost's hash-based fallback.
+
 Output columns added to the input file
 ---------------------------------------
   cate_treatment_1/2/3     CATE (uplift $) for each offer arm
@@ -47,6 +58,32 @@ from src.models.net_value_strategy import _arm_base_cost
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Helper: align a raw DataFrame to a target feature list
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _align_features(df_raw: pd.DataFrame, feature_names: list,
+                    label: str = '') -> pd.DataFrame:
+    """
+    Return a DataFrame that contains exactly ``feature_names`` columns in order.
+
+    Missing columns are filled with NaN (CatBoost handles NaN natively).
+    Extra columns are silently dropped.
+    """
+    missing = [c for c in feature_names if c not in df_raw.columns]
+    if missing:
+        print(f"\n  ⚠  {label}: {len(missing)} expected feature(s) not found "
+              f"in input.  Missing columns filled with NaN.")
+        print(f"     First 10 missing: {missing[:10]}")
+        df = df_raw.copy()
+        for col in missing:
+            df[col] = np.nan
+    else:
+        df = df_raw
+
+    return df[feature_names].copy()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Core scoring function (importable for notebook / API use)
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -63,10 +100,9 @@ def score_prospects(
     Parameters
     ----------
     df_raw : pd.DataFrame
-        Raw prospect file.  Columns must include all features expected by
-        the trained pipeline (i.e., the 1800 Epsilon-like columns).
-        ``opening_balance`` is used as the baseline balance if present;
-        if absent a column of zeros is used and a warning is printed.
+        Raw prospect file.  Must include the features used during training.
+        Columns not needed are ignored; missing feature columns are filled
+        with NaN (CatBoost handles them natively).
     models_dir : str, optional
         Directory created by ``save_pipeline()``.
         Defaults to ``config.MODELS_DIR``.
@@ -86,8 +122,8 @@ def score_prospects(
     """
     t0 = time.time()
 
-    models_dir   = models_dir   or config.MODELS_DIR
-    n_deciles     = n_deciles    or config.N_DECILES
+    models_dir    = models_dir    or config.MODELS_DIR
+    n_deciles     = n_deciles     or config.N_DECILES
     top_n_deciles = top_n_deciles or config.TOP_N_DECILES
 
     print("\n" + "="*70)
@@ -103,36 +139,32 @@ def score_prospects(
 
     # ── STEP 1: Load models ────────────────────────────────────────
     pkg = load_pipeline(models_dir)
-    pruner         = pkg['pruner']
-    xlearner       = pkg['xlearner']
-    attrition      = pkg['attrition']
-    feature_names  = pkg['feature_names']
-    cfg_snap       = pkg['config']
+    xlearner                = pkg['xlearner']
+    attrition               = pkg['attrition']
+    balance_feature_names   = pkg['balance_feature_names']
+    attrition_feature_names = pkg['attrition_feature_names']
+    cfg_snap                = pkg['config']
 
-    # ── STEP 2: Feature alignment ──────────────────────────────────
+    # ── STEP 2: Build two separate feature matrices ─────────────────
     print("\n" + "─"*70)
-    print("STEP 2: FEATURE ALIGNMENT")
+    print("STEP 2: FEATURE ALIGNMENT  (dual feature sets)")
     print("─"*70)
 
-    # Keep only columns that were present at training time; add zeros for any missing
-    missing_cols = [c for c in feature_names if c not in df_raw.columns]
-    extra_cols   = [c for c in df_raw.columns if c not in feature_names
-                    and c not in ['opening_balance', 'treatment', 'treatment_name',
-                                  'on_book_month9', 'offer']]
+    # Balance features → X-Learner (CATE + propensity)
+    X_balance = _align_features(df_raw, balance_feature_names,
+                                 label='Balance features (X-Learner)')
+    print(f"\n  Balance feature matrix   : {X_balance.shape[1]} columns")
 
-    if missing_cols:
-        print(f"\n  ⚠  {len(missing_cols)} expected feature(s) not found in input data.")
-        print(f"     Missing columns will be filled with 0.")
-        print(f"     First 10 missing: {missing_cols[:10]}")
-        for col in missing_cols:
-            df_raw[col] = 0
+    # Attrition features → AttritionModel (retention probability)
+    X_attrition = _align_features(df_raw, attrition_feature_names,
+                                   label='Attrition features (AttritionModel)')
+    print(f"  Attrition feature matrix : {X_attrition.shape[1]} columns")
 
-    if extra_cols:
-        print(f"\n  ℹ  {len(extra_cols)} extra column(s) in input (will be ignored by models).")
-
-    # Apply saved feature selection  (transform only — no re-fitting)
-    X = df_raw[feature_names].copy()
-    print(f"\n  Features after alignment: {X.shape[1]}")
+    # Apply scenario override to balance features (CATEs only)
+    if scenario:
+        for col, val in scenario.items():
+            if col in X_balance.columns:
+                X_balance[col] = val
 
     # ── STEP 3: Baseline balance ───────────────────────────────────
     if 'opening_balance' in df_raw.columns:
@@ -141,39 +173,32 @@ def score_prospects(
     else:
         baseline = np.zeros(len(df_raw))
         print("\n  ⚠  'opening_balance' not found — using 0 as baseline balance.")
-        print("     Net values will be relative to zero; decile ranking is still valid.")
 
-    # ── STEP 4: CATE prediction ───────────────────────────────────
+    # ── STEP 4: CATE prediction ────────────────────────────────────
     print("\n" + "─"*70)
-    print("STEP 3: CATE PREDICTION  (X-Learner)")
+    print("STEP 3: CATE PREDICTION  (X-Learner, balance features)")
     print("─"*70)
 
-    if scenario:
-        cates_df = xlearner.predict_cate_scenario(X, scenario)
-    else:
-        cates_df = xlearner.predict_all_cates(X)
+    cates_df = xlearner.predict_all_cates(X_balance)
 
     print(f"\n  CATE columns: {list(cates_df.columns)}")
     for col in cates_df.columns:
         print(f"    {col}: mean={cates_df[col].mean():+.2f}, "
               f"std={cates_df[col].std():.2f}")
 
-    # ── STEP 5: Retention prediction ─────────────────────────────
+    # ── STEP 5: Retention prediction ──────────────────────────────
     print("\n" + "─"*70)
-    print("STEP 4: RETENTION PREDICTION  (Attrition Model)")
+    print("STEP 4: RETENTION PREDICTION  (AttritionModel, attrition features)")
     print("─"*70)
 
-    # Attrition model was trained with 'treatment' as an optional column.
-    # For new prospecting data we don't have a treatment assignment yet;
-    # we score under the assumption of no offer (treatment = 0) for the
-    # base retention probability, then let CATEs drive offer optimisation.
+    # Use actual treatment assignment if available; otherwise assume control (0)
     treatment_col = (
         df_raw['treatment'].values.astype(int)
         if 'treatment' in df_raw.columns
         else np.zeros(len(df_raw), dtype=int)
     )
 
-    retention_proba = attrition.predict_proba(X, treatment=treatment_col)
+    retention_proba = attrition.predict_proba(X_attrition, treatment=treatment_col)
     print(f"\n  Retention probability: mean={retention_proba.mean():.3f}, "
           f"std={retention_proba.std():.3f}")
 
@@ -187,7 +212,7 @@ def score_prospects(
     for col in cates_df.columns:
         scored[col] = cates_df[col].values
 
-    p_ret = retention_proba
+    p_ret   = retention_proba
     arm_ids = sorted(int(k) for k in cfg_snap['treatment_components'])
 
     nv_cols = []
@@ -228,7 +253,7 @@ def score_prospects(
     for name, cnt in dist.items():
         print(f"    {name}: {cnt:,}  ({100*cnt/len(scored):.1f}%)")
 
-    # ── STEP 8: Decile + mail flag ────────────────────────────────
+    # ── STEP 8: Decile + mail flag ─────────────────────────────────
     print("\n" + "─"*70)
     print("STEP 6: DECILE ASSIGNMENT & MAIL FLAG")
     print("─"*70)
@@ -240,7 +265,7 @@ def score_prospects(
         duplicates='drop',
     ).astype(int)
 
-    top_cutoff = n_deciles - top_n_deciles   # e.g. 7 for top-3 of 10
+    top_cutoff = n_deciles - top_n_deciles
     scored['mail_flag'] = (scored['decile'] > top_cutoff).astype(int)
 
     n_mailed = scored['mail_flag'].sum()
@@ -250,14 +275,13 @@ def score_prospects(
     print(f"  Prospects held  : {len(scored)-n_mailed:,}  "
           f"({100*(len(scored)-n_mailed)/len(scored):.1f}%)")
 
-    # Decile summary table
     print("\n  Decile summary:")
     decile_summary = (
         scored.groupby('decile')
         .agg(
-            n_prospects      = ('optimal_net_value', 'count'),
-            avg_net_value    = ('optimal_net_value', 'mean'),
-            pct_mailed       = ('mail_flag', 'mean'),
+            n_prospects   = ('optimal_net_value', 'count'),
+            avg_net_value = ('optimal_net_value', 'mean'),
+            pct_mailed    = ('mail_flag', 'mean'),
         )
         .round(2)
     )
@@ -316,7 +340,6 @@ def _parse_args():
 def main():
     args = _parse_args()
 
-    # ── Load input file ────────────────────────────────────────────
     print(f"\nLoading prospects from: {args.input}")
     if not os.path.exists(args.input):
         print(f"ERROR: Input file not found: {args.input}")
@@ -324,13 +347,11 @@ def main():
     df_raw = pd.read_csv(args.input)
     print(f"  Loaded {len(df_raw):,} rows × {df_raw.shape[1]} columns")
 
-    # ── Resolve scenario ───────────────────────────────────────────
     scenario = None
     if args.scenario:
         scenario = config.OPTIMIZATION_SCENARIOS[args.scenario]
         print(f"  Scenario: {args.scenario}  ({scenario})")
 
-    # ── Run scoring ────────────────────────────────────────────────
     scored = score_prospects(
         df_raw        = df_raw,
         models_dir    = args.models_dir,
@@ -339,7 +360,6 @@ def main():
         scenario      = scenario,
     )
 
-    # ── Save output ────────────────────────────────────────────────
     if args.output is None:
         base = os.path.splitext(args.input)[0]
         output_path = f"{base}_scored.csv"
@@ -350,7 +370,6 @@ def main():
     scored.to_csv(output_path, index=False)
     print(f"  ✓ Scored prospects saved to: {output_path}")
 
-    # Print a quick column guide
     score_cols = [
         c for c in scored.columns
         if c.startswith(('cate_', 'net_value_', 'optimal_', 'retention_',

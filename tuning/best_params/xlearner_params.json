@@ -1,0 +1,16 @@
+{
+  "iterations": 200,
+  "depth": 5,
+  "learning_rate": 0.019417,
+  "l2_leaf_reg": 3.2457,
+  "min_data_in_leaf": 3,
+  "border_count": 224,
+  "eval_metric": "RMSE",
+  "od_type": "Iter",
+  "od_wait": 50,
+  "random_seed": 42,
+  "thread_count": -1,
+  "verbose": false,
+  "allow_writing_files": false,
+  "nan_mode": "Min"
+}
