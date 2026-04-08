@@ -50,6 +50,23 @@ import config
 warnings.filterwarnings('ignore')
 
 
+# ---------------------------------------------------------------------------
+def _encode_cats(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return a copy of *df* with all categorical / object columns replaced by
+    their integer codes (NaN → -1).  Used to prepare data for sklearn
+    estimators (StandardScaler, LogisticRegression, XGBoost) that cannot
+    handle non-numeric dtypes.
+    """
+    out = df.copy()
+    for col in out.columns:
+        if (pd.api.types.is_categorical_dtype(out[col])
+                or pd.api.types.is_object_dtype(out[col])):
+            out[col] = pd.Categorical(out[col]).codes.astype('int16')
+    return out
+# ---------------------------------------------------------------------------
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Main class
 # ─────────────────────────────────────────────────────────────────────────────
@@ -206,22 +223,29 @@ class IPTWWeighting:
         Fit a multi-class classifier and return the full probability matrix
         P(T=k | X) with columns ordered by self.arm_ids.
 
+        StandardScaler is applied ONLY for the non-CatBoost paths (logistic /
+        XGBoost).  CatBoost handles categorical columns and missing values
+        natively and must receive the raw DataFrame — applying StandardScaler
+        to a DataFrame that contains pd.Categorical columns raises a
+        ValueError before we ever reach the CatBoost branch.
+
         Returns
         -------
         np.ndarray, shape (n_samples, n_arms)
         """
-        self._scaler = StandardScaler()
-        X_sc = self._scaler.fit_transform(X)
-
         if self.ps_method == 'catboost':
             proba = self._catboost_ps(X, t_arr)   # uses raw X, no scaling
         elif self.ps_method == 'xgboost':
+            X_num = _encode_cats(X)
+            self._scaler = StandardScaler()
+            X_sc  = self._scaler.fit_transform(X_num)
             proba = self._xgboost_ps(X_sc, t_arr)
         else:
+            X_num = _encode_cats(X)
+            self._scaler = StandardScaler()
+            X_sc  = self._scaler.fit_transform(X_num)
             proba = self._logistic_ps(X_sc, t_arr)
 
-        # Ensure columns are ordered by self.arm_ids
-        # sklearn's predict_proba returns columns ordered by model.classes_
         return proba
 
     def _catboost_ps(self, X: pd.DataFrame, t_arr: np.ndarray) -> np.ndarray:
@@ -231,16 +255,27 @@ class IPTWWeighting:
         Uses raw (unscaled) X — CatBoost handles feature scaling,
         missing values, and mixed dtypes internally.  Columns are
         reordered to match self.arm_ids before returning.
+
+        Note: CatBoost requires cat_feature values to be int or str —
+        float NaN is not allowed.  We replace NaN in categorical columns
+        with the string '__NA__' before building the Pool.
         """
         from catboost import CatBoostClassifier, Pool
+
+        # Replace NaN in categorical columns with '__NA__' string
+        # (CatBoost rejects float NaN in cat_features)
+        X_pool = X.copy()
+        for col in X_pool.columns:
+            if X_pool[col].dtype.name in ('object', 'category'):
+                X_pool[col] = X_pool[col].astype(object).fillna('__NA__')
 
         # Map arm IDs to consecutive labels 0..K-1 for CatBoost
         arm_map     = {arm: idx for idx, arm in enumerate(self.arm_ids)}
         t_remapped  = np.array([arm_map[a] for a in t_arr], dtype=int)
 
-        cat_indices = [i for i, col in enumerate(X.columns)
-                       if X[col].dtype.name in ('object', 'category')]
-        pool = Pool(data=X, label=t_remapped, cat_features=cat_indices)
+        cat_indices = [i for i, col in enumerate(X_pool.columns)
+                       if X_pool[col].dtype.name == 'object']
+        pool = Pool(data=X_pool, label=t_remapped, cat_features=cat_indices)
 
         params = dict(config.CATBOOST_PROPENSITY_PARAMS)
         # Multi-class IPTW: override to MultiClass objective
@@ -252,7 +287,7 @@ class IPTWWeighting:
         model.fit(pool)
         self._ps_model = model
 
-        proba = model.predict_proba(X)   # shape (n, K), columns = 0..K-1
+        proba = model.predict_proba(X_pool)   # use NaN-replaced X_pool; shape (n, K)
 
         for i, arm_id in enumerate(self.arm_ids):
             ps_col = proba[:, i]
@@ -371,7 +406,12 @@ class IPTWWeighting:
 
             balanced_count = 0
             for j, feat in enumerate(feat_cols):
-                col = X_sub[:, j]
+                # Skip categorical / object columns — SMD is undefined for them
+                if (pd.api.types.is_categorical_dtype(X[feat])
+                        or pd.api.types.is_object_dtype(X[feat])):
+                    continue
+
+                col = X_sub[:, j].astype(float)
 
                 # Unweighted SMD
                 mu_t_uw = col[t_idx].mean()

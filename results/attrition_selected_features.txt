@@ -1,10 +1,19 @@
-Attrition Selected Features (7):
+Attrition Selected Features (16):
 ============================================================
 
   age
+  channel_preference
   checking_account_balance_est
   credit_score_modeled
   debt_to_income_ratio
   direct_mail_responsiveness
+  fin_0203
+  fin_0279
+  geo_0160
   homeowner_flag
+  life_stage_category
+  noise_0248
+  occupation_category
+  region
   revolving_utilization
+  risk_tier

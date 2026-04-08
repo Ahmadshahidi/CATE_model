@@ -1,22 +1,25 @@
 {
-  "saved_at": "2026-03-28T13:08:36.260074",
+  "saved_at": "2026-04-08T10:39:38.512119",
   "random_seed": 42,
   "treatment_components": {
     "0": 0,
     "1": 100,
     "2": 400,
-    "3": 500
+    "3": 500,
+    "4": 1000
   },
   "treatments": {
     "0": "Control",
     "1": "$100",
     "2": "$400",
-    "3": "$500"
+    "3": "$500",
+    "4": "$1000"
   },
   "offer_amounts": [
     100,
     400,
-    500
+    500,
+    1000
   ],
   "offer_cost_rate": 0.5,
   "stipulation_cost": 5.0,
@@ -70,6 +73,22 @@
   "correlation_threshold": 0.95,
   "boruta_n_trials": 100,
   "boruta_percentile": 100,
-  "n_balance_features": 1,
-  "n_attrition_features": 7
+  "boruta_balance_top_n": null,
+  "boruta_attrition_top_n": null,
+  "boruta_balance_force_include": [
+    "risk_tier",
+    "region",
+    "occupation_category",
+    "channel_preference",
+    "life_stage_category"
+  ],
+  "boruta_attrition_force_include": [
+    "risk_tier",
+    "region",
+    "occupation_category",
+    "channel_preference",
+    "life_stage_category"
+  ],
+  "n_balance_features": 9,
+  "n_attrition_features": 16
 }

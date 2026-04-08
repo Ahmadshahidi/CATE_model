@@ -38,6 +38,22 @@ import config
 warnings.filterwarnings('ignore')
 
 
+# ---------------------------------------------------------------------------
+def _encode_cats(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return a copy of *df* with all categorical / object columns replaced by
+    their integer codes (NaN → -1).  Used to prepare data for sklearn
+    estimators (StandardScaler, LogisticRegression, XGBoost) that cannot
+    handle non-numeric dtypes.
+    """
+    out = df.copy()
+    for col in out.columns:
+        if pd.api.types.is_categorical_dtype(out[col]) or pd.api.types.is_object_dtype(out[col]):
+            out[col] = pd.Categorical(out[col]).codes.astype('int16')
+    return out
+# ---------------------------------------------------------------------------
+
+
 class PropensityScoreMatching:
     """
     Nearest-neighbour 1:1 propensity score matching (arm vs. control).
@@ -149,13 +165,23 @@ class PropensityScoreMatching:
     # ------------------------------------------------------------------
     def _estimate_ps(self, X_sub: pd.DataFrame,
                      t_sub: np.ndarray, arm_id: int) -> np.ndarray:
-        """Estimate propensity scores via logistic regression or XGBoost."""
-        scaler = StandardScaler()
-        X_sc   = scaler.fit_transform(X_sub)
+        """
+        Estimate propensity scores.
 
+        StandardScaler is applied ONLY for the non-CatBoost paths (logistic /
+        XGBoost).  CatBoost handles categorical columns and missing values
+        natively and must receive the raw DataFrame — applying StandardScaler
+        to a DataFrame that contains pd.Categorical columns raises a
+        ValueError before we ever reach the CatBoost branch.
+        """
         if self.method == 'catboost':
             ps = self._catboost_ps(X_sub, t_sub, arm_id)
+            self._ps_models[arm_id] = (None, None)
         elif self.method == 'xgboost':
+            # Encode categoricals as int codes before scaling
+            X_num = _encode_cats(X_sub)
+            scaler = StandardScaler()
+            X_sc   = scaler.fit_transform(X_num)
             try:
                 from xgboost import XGBClassifier
                 model = XGBClassifier(
@@ -171,10 +197,14 @@ class PropensityScoreMatching:
                 ps = model.predict_proba(X_sc)[:, 1]
             except Exception:
                 ps = self._logistic_ps(X_sc, t_sub)
+            self._ps_models[arm_id] = (scaler, None)
         else:
+            X_num = _encode_cats(X_sub)
+            scaler = StandardScaler()
+            X_sc   = scaler.fit_transform(X_num)
             ps = self._logistic_ps(X_sc, t_sub)
+            self._ps_models[arm_id] = (scaler, None)
 
-        self._ps_models[arm_id] = (scaler, None)   # store scaler for later
         print(f"    PS range: [{ps.min():.3f}, {ps.max():.3f}]  "
               f"mean={ps.mean():.3f}")
         return ps
@@ -187,12 +217,23 @@ class PropensityScoreMatching:
         Uses raw (unscaled) X_sub — CatBoost handles feature scaling,
         missing values, and mixed dtypes internally.  No StandardScaler
         is applied before this method.
+
+        Note: CatBoost requires cat_feature values to be int or str —
+        float NaN is not allowed.  We replace NaN in categorical columns
+        with the string '__NA__' before building the Pool.
         """
         from catboost import CatBoostClassifier, Pool
 
-        cat_indices = [i for i, col in enumerate(X_sub.columns)
-                       if X_sub[col].dtype.name in ('object', 'category')]
-        pool = Pool(data=X_sub, label=t_sub.astype(int),
+        # Replace NaN in categorical columns with '__NA__' string
+        # (CatBoost rejects float NaN in cat_features)
+        X_pool = X_sub.copy()
+        for col in X_pool.columns:
+            if X_pool[col].dtype.name in ('object', 'category'):
+                X_pool[col] = X_pool[col].astype(object).fillna('__NA__')
+
+        cat_indices = [i for i, col in enumerate(X_pool.columns)
+                       if X_pool[col].dtype.name == 'object']
+        pool = Pool(data=X_pool, label=t_sub.astype(int),
                     cat_features=cat_indices)
 
         params = dict(config.CATBOOST_PROPENSITY_PARAMS)
@@ -200,7 +241,7 @@ class PropensityScoreMatching:
         model.fit(pool)
         self._ps_models[arm_id] = (None, model)   # no scaler needed
 
-        ps = model.predict_proba(X_sub)[:, 1]
+        ps = model.predict_proba(X_pool)[:, 1]   # use NaN-replaced X_pool
         return ps
 
     def _logistic_ps(self, X_sc: np.ndarray, t: np.ndarray) -> np.ndarray:
@@ -262,6 +303,11 @@ class PropensityScoreMatching:
         m_ctrl  = matched_df[matched_df['matched_binary_treatment'] == 0][feat_cols]
 
         for feat in feat_cols:
+            # Skip categorical / object columns — SMD is undefined for them
+            if (pd.api.types.is_categorical_dtype(X_sub[feat])
+                    or pd.api.types.is_object_dtype(X_sub[feat])):
+                continue
+
             mu_t_bef  = treated_before[feat].mean()
             mu_c_bef  = control_before[feat].mean()
             sd_bef    = np.sqrt((treated_before[feat].var() +
@@ -405,10 +451,8 @@ class PropensityScoreMatching:
             mdf = self.matched_data[arm_id]
             t_sub2, ps2 = all_ps[arm_id]
             feat_cols    = [c for c in mdf.columns if c != 'matched_binary_treatment']
-            # Re-use pre-matched PS (approx)
-            from sklearn.linear_model import LogisticRegression
-            from sklearn.preprocessing import StandardScaler
-            X_m = mdf[feat_cols]
+            # Re-estimate PS on matched data (approx, numeric-only LR)
+            X_m = _encode_cats(mdf[feat_cols])  # encode cats before StandardScaler
             t_m = mdf['matched_binary_treatment'].values
             scaler = StandardScaler()
             X_sc   = scaler.fit_transform(X_m)

@@ -1,3 +1,11 @@
 [
-  "investment_propensity_score"
+  "geo_0002",
+  "investment_propensity_score",
+  "remail",
+  "stipulation",
+  "risk_tier",
+  "region",
+  "occupation_category",
+  "channel_preference",
+  "life_stage_category"
 ]

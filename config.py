@@ -1,5 +1,5 @@
 # Configuration for Incremental Campaign Uplift Modeling Project
-# Treatment Design: offer amounts only ($100, $400, $500)
+# Treatment Design: offer amounts only (configurable)
 # remail and stipulation are treated as predictors / covariates,
 # not as treatment arms. Optimization runs scenarios with remail/stipulation ON/OFF.
 
@@ -16,15 +16,31 @@ N_FEATURES = 1800
 RANDOM_SEED = 42
 
 # ===========================================================
-# TREATMENT DESIGN  (offer amounts only)
+# TREATMENT DESIGN  (offer amounts — fully configurable)
 # ===========================================================
-# Each treatment is identified by its offer dollar amount.
-#   0  → Control  (no offer)
-#   1  → $100 offer
-#   2  → $400 offer
-#   3  → $500 offer
 #
-# remail and stipulation are NOT treatment arms any more —
+# ┌─────────────────────────────────────────────────────────┐
+# │  HOW TO ADD / REMOVE OFFER ARMS                         │
+# │                                                         │
+# │  1. Edit TREATMENT_COMPONENTS:                          │
+# │     • Key 0 must always be the control arm (offer=$0).  │
+# │     • Other keys are arm IDs (any positive integers).   │
+# │     • Values are the offer dollar amounts.              │
+# │                                                         │
+# │  Examples:                                              │
+# │    Add $1000 arm:   4: 1000                             │
+# │    Remove $100 arm: delete the  1: 100  entry           │
+# │                                                         │
+# │  2. (Optional) Set TREATMENT_PROBS to a list of floats  │
+# │     summing to 1.0, one per arm, in the same order as   │
+# │     TREATMENT_COMPONENTS.  Leave it as None to use      │
+# │     equal allocation across all arms.                   │
+# │                                                         │
+# │  Everything else (labels, offer list, model loops,      │
+# │  output columns) is derived automatically.              │
+# └─────────────────────────────────────────────────────────┘
+#
+# remail and stipulation are NOT treatment arms —
 # they are covariates/predictors in the model and are toggled
 # via OPTIMIZATION_SCENARIOS at the optimization step.
 #
@@ -36,34 +52,41 @@ TREATMENT_COMPONENTS = {
     1: 100,  # $100 offer
     2: 400,  # $400 offer
     3: 500,  # $500 offer
+    4: 1000, # $1000 offer
 }
 
-# Human-readable label for each arm
+# Human-readable label for each arm (auto-derived — do not edit)
 TREATMENTS = {
     k: ('Control' if v == 0 else f'${v}')
     for k, v in TREATMENT_COMPONENTS.items()
 }
 
-# Offer dollar amounts (excluding control)
-OFFER_AMOUNTS = [100, 400, 500]
+# Offer dollar amounts, excluding control (auto-derived — do not edit)
+OFFER_AMOUNTS = [v for k, v in TREATMENT_COMPONENTS.items() if k != 0]
 
 # -----------------------------------------------------------
 # Treatment allocation probabilities
-# Must sum to 1.0 and have one entry per arm in TREATMENT_COMPONENTS.
+# Set to None for equal allocation across all arms.
+# Set to a list of floats (one per arm, same order as
+# TREATMENT_COMPONENTS, summing to 1.0) for custom splits.
 # -----------------------------------------------------------
-TREATMENT_PROBS = [
-    0.20,   # 0: Control
-    0.25,   # 1: $100
-    0.30,   # 2: $400
-    0.25,   # 3: $500
-]
+TREATMENT_PROBS = None   # None → equal split; or e.g. [0.20, 0.25, 0.30, 0.25]
 
-# Quick sanity check at import time
+# Resolve probabilities (equal split when TREATMENT_PROBS is None)
+if TREATMENT_PROBS is None:
+    _n_arms = len(TREATMENT_COMPONENTS)
+    _equal  = round(1.0 / _n_arms, 10)
+    TREATMENT_PROBS = [_equal] * _n_arms
+    # Correct floating-point rounding on the last element
+    TREATMENT_PROBS[-1] = round(1.0 - sum(TREATMENT_PROBS[:-1]), 10)
+
+# Quick sanity checks at import time
 assert abs(sum(TREATMENT_PROBS) - 1.0) < 1e-9, \
     f"TREATMENT_PROBS must sum to 1.0 (got {sum(TREATMENT_PROBS):.6f})"
 
 assert len(TREATMENT_PROBS) == len(TREATMENT_COMPONENTS), \
-    "TREATMENT_PROBS length must match TREATMENT_COMPONENTS"
+    ("TREATMENT_PROBS length must match TREATMENT_COMPONENTS — "
+     "set TREATMENT_PROBS = None for automatic equal allocation.")
 
 # ===========================================================
 # OPTIMIZATION SCENARIOS
@@ -202,6 +225,71 @@ CORRELATION_THRESHOLD = 0.95   # Remove one of two correlated features
 BORUTA_N_TRIALS      = 100
 BORUTA_PERCENTILE    = 100     # Use max of shadow features
 BORUTA_RANDOM_STATE  = RANDOM_SEED
+
+# ---------------------------------------------------------------------------
+# TOP-N GUARANTEE
+# ---------------------------------------------------------------------------
+# When set to an integer, Boruta-SHAP guarantees *at least* that many features
+# are returned for the respective model path.  Features are added in priority
+# order:
+#   1. Confirmed (accepted) features — always included first.
+#   2. Tentative features, ranked by Boruta hit-rate (highest first) — the
+#      "rough-fix" tier; added until the Top-N floor is met.
+#   3. Any remaining features (including normally-rejected ones), ranked by
+#      their Boruta importance / hit-rate score — added until Top-N is met.
+#
+# Set to None to disable (default Boruta behaviour — include confirmed +
+# tentative only).
+# ---------------------------------------------------------------------------
+BORUTA_BALANCE_TOP_N   = None   # e.g. 30  →  keep at least 30 for X-Learner
+BORUTA_ATTRITION_TOP_N = None   # e.g. 20  →  keep at least 20 for AttritionModel
+
+# ---------------------------------------------------------------------------
+# FORCE-INCLUDE FEATURES
+# ---------------------------------------------------------------------------
+# Features listed here are *always* added to the final feature set for the
+# respective model path, regardless of whether Leshy (Boruta) accepted or
+# rejected them.  Use this to guarantee that domain-critical variables are
+# never silently dropped.
+#
+# • Any column not present in the post-Step-1 feature matrix will be added as
+#   an all-zeros column with a warning (inference / transform mode).
+# • Lists may be empty ([]) to disable the override.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# FORCE-INCLUDE CATEGORICAL FEATURES
+# ---------------------------------------------------------------------------
+# Categorical columns in this list are forced into EVERY model path
+# (both the X-Learner balance model and the attrition classifier),
+# regardless of Leshy's verdict.
+#
+# These 6 columns are generated by src/data_generation.py and passed
+# through Step 1 (InitialPruning) unchanged.  Leshy may elect to reject
+# some of them if the encoded integer codes show low SHAP importance —
+# the entries below guarantee they are always available to CatBoost, which
+# handles them natively.
+#
+# Add or remove entries to control which categorical columns are forced in.
+# Comment out any column you want to let Leshy decide on instead.
+# ---------------------------------------------------------------------------
+FORCE_INCLUDE_CATEGORICAL = [
+    'risk_tier',            # A / B / C / D  — derived from credit score
+    'region',               # Northeast / Midwest / South / West
+    'occupation_category',  # 8 broad occupational groups
+    'channel_preference',   # Mail / Online / Branch / Mobile
+    'life_stage_category',  # Young Single / Young Family / Mature Family / ...
+    # 'state',              # uncomment to also force-include the 50-state column
+]
+
+# Per-model-path force-include lists.
+# Extend with additional numeric features specific to each path if needed.
+BORUTA_BALANCE_FORCE_INCLUDE   = list(FORCE_INCLUDE_CATEGORICAL) + [
+    # e.g. 'estimated_income',
+]
+BORUTA_ATTRITION_FORCE_INCLUDE = list(FORCE_INCLUDE_CATEGORICAL) + [
+    # e.g. 'age',
+]
 
 # ===========================================================
 # MODEL PARAMETERS

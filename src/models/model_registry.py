@@ -13,7 +13,7 @@ Artefacts written
   step1_pruner.joblib            — InitialPruning  (variance + correlation filter)
   step2_boruta_balance.joblib    — BorutaSHAP  (balance target → X-Learner features)
   step2_boruta_attrition.joblib  — BorutaSHAP  (attrition target → retention features)
-  xlearner_uplift.joblib         — XLearnerUplift  (CatBoost CATE models, 3 arms)
+  xlearner_uplift.joblib         — XLearnerUplift  (CatBoost CATE models, N arms)
   attrition_model.joblib         — AttritionModel  (CatBoostClassifier wrapper)
   balance_feature_names.json     — ordered list of features for X-Learner
   attrition_feature_names.json   — ordered list of features for AttritionModel
@@ -180,10 +180,14 @@ def save_pipeline(pruner,
         'catboost_propensity':     config.CATBOOST_PROPENSITY_PARAMS,
         'variance_threshold':      config.VARIANCE_THRESHOLD,
         'correlation_threshold':   config.CORRELATION_THRESHOLD,
-        'boruta_n_trials':         config.BORUTA_N_TRIALS,
-        'boruta_percentile':       config.BORUTA_PERCENTILE,
-        'n_balance_features':      len(balance_feature_names),
-        'n_attrition_features':    len(attrition_feature_names),
+        'boruta_n_trials':                config.BORUTA_N_TRIALS,
+        'boruta_percentile':              config.BORUTA_PERCENTILE,
+        'boruta_balance_top_n':           getattr(config, 'BORUTA_BALANCE_TOP_N', None),
+        'boruta_attrition_top_n':         getattr(config, 'BORUTA_ATTRITION_TOP_N', None),
+        'boruta_balance_force_include':   getattr(config, 'BORUTA_BALANCE_FORCE_INCLUDE', []),
+        'boruta_attrition_force_include': getattr(config, 'BORUTA_ATTRITION_FORCE_INCLUDE', []),
+        'n_balance_features':             len(balance_feature_names),
+        'n_attrition_features':           len(attrition_feature_names),
     }
     cfg_path = os.path.join(save_dir, _CONFIG_FILE)
     with open(cfg_path, 'w') as fh:

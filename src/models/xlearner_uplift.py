@@ -70,8 +70,18 @@ def _get_cat_feature_indices(df: pd.DataFrame) -> list:
 
 
 def _make_cb_pool(X_arr, y_arr, cat_indices, feature_names, sample_weight=None):
-    """Build a CatBoost Pool from a numpy array with proper feature names."""
+    """
+    Build a CatBoost Pool from a numpy array with proper feature names.
+
+    CatBoost requires cat_feature values to be int or str — float NaN is not
+    allowed.  We replace NaN in categorical columns with the string '__NA__'
+    before creating the Pool so that any missing values in force-included
+    categorical columns (risk_tier, region, etc.) are handled gracefully.
+    """
     df_tmp = pd.DataFrame(X_arr, columns=feature_names)
+    # Replace NaN in categorical columns with '__NA__' string
+    for i in cat_indices:
+        df_tmp.iloc[:, i] = df_tmp.iloc[:, i].astype(object).fillna('__NA__')
     return Pool(
         data          = df_tmp,
         label         = y_arr,

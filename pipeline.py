@@ -162,6 +162,8 @@ def main():
         y=y_balance,
         task='regression',
         save_report_path=step2_balance_report_path,
+        top_n=getattr(config, 'BORUTA_BALANCE_TOP_N', None),
+        force_include=getattr(config, 'BORUTA_BALANCE_FORCE_INCLUDE', []),
     )
     print(f"\n  Step 2a Complete (balance): "
           f"{X_step1.shape[1]}  →  {X_balance.shape[1]} features")
@@ -184,6 +186,8 @@ def main():
         y=y_attrition,
         task='classification',
         save_report_path=step2_attrition_report_path,
+        top_n=getattr(config, 'BORUTA_ATTRITION_TOP_N', None),
+        force_include=getattr(config, 'BORUTA_ATTRITION_FORCE_INCLUDE', []),
     )
     print(f"\n  Step 2b Complete (attrition): "
           f"{X_step1.shape[1]}  →  {X_attrition.shape[1]} features")
@@ -633,7 +637,8 @@ def main():
     print(f"    step1_pruner.joblib              — variance + correlation pruner")
     print(f"    step2_boruta_balance.joblib       — Boruta-SHAP (balance target)")
     print(f"    step2_boruta_attrition.joblib     — Boruta-SHAP (attrition target)")
-    print(f"    xlearner_uplift.joblib            — X-Learner CATE models (3 arms)")
+    n_offer_arms = len(config.TREATMENT_COMPONENTS) - 1
+    print(f"    xlearner_uplift.joblib            — X-Learner CATE models ({n_offer_arms} arms)")
     print(f"    attrition_model.joblib            — CatBoostClassifier retention predictor")
     print(f"    balance_feature_names.json        — {len(X_balance.columns)} balance features")
     print(f"    attrition_feature_names.json      — {len(X_attrition.columns)} attrition features")

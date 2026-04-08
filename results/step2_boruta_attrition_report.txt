@@ -1,33 +1,50 @@
 ======================================================================
-STEP 2: BORUTA-SHAP FEATURE SELECTION REPORT
+STEP 2: LESHY (arfs) FEATURE SELECTION REPORT
 ======================================================================
 
-n_trials   : 100
-percentile : 100
+n_trials (max_iter) : 100
+percentile (perc)   : 100
+top_n (floor)       : None
+force_include       : ['risk_tier', 'region', 'occupation_category', 'channel_preference', 'life_stage_category']
 
-  Accepted    : 7
-  Tentative   : 0  (included in output)
-  Rejected    : 1423
-  Total output: 7
+  Confirmed      : 10
+  Tentative      : 1  (included in output)
+  Rejected       : 1425
+  Added for Top-N: 0  (rescued rejected, hit top_n=None)
+  Force-included : 5
+  Total output   : 16
 
-──────────────────────────────────────────────────────────────────────
-ACCEPTED FEATURES  (hit_rate > 0.5):
-──────────────────────────────────────────────────────────────────────
+----------------------------------------------------------------------
+CONFIRMED FEATURES:
+----------------------------------------------------------------------
   age                                                 hit_rate=1.000
   checking_account_balance_est                        hit_rate=1.000
   credit_score_modeled                                hit_rate=1.000
   debt_to_income_ratio                                hit_rate=1.000
   direct_mail_responsiveness                          hit_rate=1.000
+  fin_0203                                            hit_rate=1.000
+  fin_0279                                            hit_rate=1.000
   homeowner_flag                                      hit_rate=1.000
+  noise_0248                                          hit_rate=1.000
   revolving_utilization                               hit_rate=1.000
 
-──────────────────────────────────────────────────────────────────────
+----------------------------------------------------------------------
 TENTATIVE FEATURES  (included in output by default):
-──────────────────────────────────────────────────────────────────────
+----------------------------------------------------------------------
+  geo_0160                                            hit_rate=0.500
 
-──────────────────────────────────────────────────────────────────────
+----------------------------------------------------------------------
+FORCE-INCLUDED FEATURES  (always kept regardless of verdict):
+----------------------------------------------------------------------
+  risk_tier                                           hit_rate=0.000  [rejected]
+  region                                              hit_rate=0.000  [rejected]
+  occupation_category                                 hit_rate=0.000  [rejected]
+  channel_preference                                  hit_rate=0.000  [rejected]
+  life_stage_category                                 hit_rate=0.000  [rejected]
+
+----------------------------------------------------------------------
 REJECTED FEATURES:
-──────────────────────────────────────────────────────────────────────
+----------------------------------------------------------------------
   atm_usage_frequency                                 hit_rate=0.000
   auto_loan_indicator                                 hit_rate=0.000
   beh_0000                                            hit_rate=0.000
@@ -337,6 +354,7 @@ REJECTED FEATURES:
   beh_0390                                            hit_rate=0.000
   beh_0391                                            hit_rate=0.000
   branch_visit_frequency                              hit_rate=0.000
+  channel_preference                                  hit_rate=0.000
   credit_card_spend_monthly                           hit_rate=0.000
   debit_card_spend_monthly                            hit_rate=0.000
   demo_0000                                           hit_rate=0.000
@@ -657,7 +675,6 @@ REJECTED FEATURES:
   fin_0200                                            hit_rate=0.000
   fin_0201                                            hit_rate=0.000
   fin_0202                                            hit_rate=0.000
-  fin_0203                                            hit_rate=0.000
   fin_0206                                            hit_rate=0.000
   fin_0207                                            hit_rate=0.000
   fin_0208                                            hit_rate=0.000
@@ -715,7 +732,6 @@ REJECTED FEATURES:
   fin_0274                                            hit_rate=0.000
   fin_0277                                            hit_rate=0.000
   fin_0278                                            hit_rate=0.000
-  fin_0279                                            hit_rate=0.000
   fin_0280                                            hit_rate=0.000
   fin_0281                                            hit_rate=0.000
   fin_0282                                            hit_rate=0.000
@@ -851,7 +867,6 @@ REJECTED FEATURES:
   geo_0157                                            hit_rate=0.000
   geo_0158                                            hit_rate=0.000
   geo_0159                                            hit_rate=0.000
-  geo_0160                                            hit_rate=0.000
   geo_0162                                            hit_rate=0.000
   geo_0163                                            hit_rate=0.000
   geo_0165                                            hit_rate=0.000
@@ -884,6 +899,7 @@ REJECTED FEATURES:
   household_size                                      hit_rate=0.000
   investment_account_indicator                        hit_rate=0.000
   investment_propensity_score                         hit_rate=0.000
+  life_stage_category                                 hit_rate=0.000
   life_stage_score                                    hit_rate=0.000
   liquid_asset_indicator                              hit_rate=0.000
   liquid_assets_estimated                             hit_rate=0.000
@@ -1088,7 +1104,6 @@ REJECTED FEATURES:
   noise_0243                                          hit_rate=0.000
   noise_0245                                          hit_rate=0.000
   noise_0246                                          hit_rate=0.000
-  noise_0248                                          hit_rate=0.000
   noise_0249                                          hit_rate=0.000
   noise_0250                                          hit_rate=0.000
   noise_0251                                          hit_rate=0.000
@@ -1132,6 +1147,7 @@ REJECTED FEATURES:
   number_of_bank_accounts                             hit_rate=0.000
   number_of_children                                  hit_rate=0.000
   number_of_credit_cards                              hit_rate=0.000
+  occupation_category                                 hit_rate=0.000
   occupation_code                                     hit_rate=0.000
   online_banking_activity                             hit_rate=0.000
   online_purchase_propensity                          hit_rate=0.000
@@ -1444,9 +1460,12 @@ REJECTED FEATURES:
   psy_0390                                            hit_rate=0.000
   psy_0391                                            hit_rate=0.000
   psy_0394                                            hit_rate=0.000
+  region                                              hit_rate=0.000
   remail                                              hit_rate=0.000
   retirement_account_indicator                        hit_rate=0.000
+  risk_tier                                           hit_rate=0.000
   savings_account_indicator                           hit_rate=0.000
+  state                                               hit_rate=0.000
   stipulation                                         hit_rate=0.000
   total_debt_estimated                                hit_rate=0.000
   years_at_current_address                            hit_rate=0.000

@@ -5,13 +5,14 @@ STEP 1: INITIAL PRUNING REPORT
 Variance threshold    : 0.01
 Correlation threshold : 0.95
 
-Total features removed: 372
+Total numeric features removed : 372
   Via variance filter     : 198
   Via correlation filter  : 174
-Features retained         : 1430
+Categorical features (pass-through): 6
+Total features retained : 1436
 
 ──────────────────────────────────────────────────────────────────────
-REMOVED — Near-constant (variance < 0.01):
+REMOVED — Near-constant numeric (variance < 0.01):
 ──────────────────────────────────────────────────────────────────────
   beh_0002
   beh_0004
@@ -213,7 +214,7 @@ REMOVED — Near-constant (variance < 0.01):
   psy_0393
 
 ──────────────────────────────────────────────────────────────────────
-REMOVED — Highly correlated (|r| > 0.95):
+REMOVED — Highly correlated numeric (|r| > 0.95):
 ──────────────────────────────────────────────────────────────────────
   beh_0030
   beh_0047
@@ -389,6 +390,16 @@ REMOVED — Highly correlated (|r| > 0.95):
   psy_0395
   wealth_segment_score
   zip_median_income
+
+──────────────────────────────────────────────────────────────────────
+CATEGORICAL FEATURES PASSED THROUGH UNCHANGED:
+──────────────────────────────────────────────────────────────────────
+  channel_preference
+  life_stage_category
+  occupation_category
+  region
+  risk_tier
+  state
 
 ──────────────────────────────────────────────────────────────────────
 RETAINED FEATURES:
@@ -703,6 +714,7 @@ RETAINED FEATURES:
   beh_0390
   beh_0391
   branch_visit_frequency
+  channel_preference
   checking_account_balance_est
   credit_card_spend_monthly
   credit_score_modeled
@@ -1255,6 +1267,7 @@ RETAINED FEATURES:
   household_size
   investment_account_indicator
   investment_propensity_score
+  life_stage_category
   life_stage_score
   liquid_asset_indicator
   liquid_assets_estimated
@@ -1503,6 +1516,7 @@ RETAINED FEATURES:
   number_of_bank_accounts
   number_of_children
   number_of_credit_cards
+  occupation_category
   occupation_code
   online_banking_activity
   online_purchase_propensity
@@ -1815,10 +1829,13 @@ RETAINED FEATURES:
   psy_0390
   psy_0391
   psy_0394
+  region
   remail
   retirement_account_indicator
   revolving_utilization
+  risk_tier
   savings_account_indicator
+  state
   stipulation
   total_debt_estimated
   years_at_current_address

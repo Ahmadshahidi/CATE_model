@@ -49,6 +49,19 @@ def _get_cat_feature_indices(X: pd.DataFrame) -> list:
             if X[col].dtype.name in ('object', 'category')]
 
 
+def _fill_cat_nans(df: pd.DataFrame, cat_indices: list) -> pd.DataFrame:
+    """
+    Return a copy of *df* with NaN in categorical columns replaced by the
+    string '__NA__'.  CatBoost requires cat_feature values to be int or str
+    — float NaN is not allowed and raises a CatBoostError at Pool init time.
+    """
+    out = df.copy()
+    for i in cat_indices:
+        col = out.columns[i]
+        out[col] = out[col].astype(object).fillna('__NA__')
+    return out
+
+
 class AttritionModel:
     """
     CatBoost-based binary retention classifier.
@@ -77,6 +90,7 @@ class AttritionModel:
         self.model             = None
         self.feature_names     = []
         self.cat_feature_names = []
+        self.cat_indices       = []   # column positions of categorical features
         self.threshold         = 0.5
 
     # ------------------------------------------------------------------
@@ -118,16 +132,19 @@ class AttritionModel:
 
         # Identify categorical feature indices (after augmentation)
         cat_indices = _get_cat_feature_indices(X_aug)
+        self.cat_indices       = cat_indices
         self.cat_feature_names = [X_aug.columns[i] for i in cat_indices]
 
-        # Build CatBoost Pools (required to pass cat_features correctly)
+        # Build CatBoost Pools (required to pass cat_features correctly).
+        # Replace NaN in categorical columns with '__NA__' first —
+        # CatBoost rejects float NaN in cat_features.
         train_pool = Pool(
-            data         = X_tr,
+            data         = _fill_cat_nans(X_tr,  cat_indices),
             label        = y_tr,
             cat_features = cat_indices,
         )
         val_pool = Pool(
-            data         = X_val,
+            data         = _fill_cat_nans(X_val, cat_indices),
             label        = y_val,
             cat_features = cat_indices,
         )
@@ -172,6 +189,11 @@ class AttritionModel:
         elif 'treatment_indicator' in self.model.feature_names_:
             # If trained with treatment, default to 0 (no offer) at inference
             X_aug['treatment_indicator'] = 0
+
+        # Replace NaN in categorical columns with '__NA__' before inference
+        # (CatBoost rejects float NaN in cat_features at prediction time too)
+        if self.cat_indices:
+            X_aug = _fill_cat_nans(X_aug, self.cat_indices)
 
         return self.model.predict_proba(X_aug)[:, 1]
 

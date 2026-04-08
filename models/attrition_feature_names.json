@@ -1,9 +1,18 @@
 [
-  "checking_account_balance_est",
-  "direct_mail_responsiveness",
+  "age",
+  "homeowner_flag",
   "credit_score_modeled",
   "revolving_utilization",
-  "homeowner_flag",
+  "checking_account_balance_est",
   "debt_to_income_ratio",
-  "age"
+  "fin_0203",
+  "fin_0279",
+  "direct_mail_responsiveness",
+  "noise_0248",
+  "geo_0160",
+  "risk_tier",
+  "region",
+  "occupation_category",
+  "channel_preference",
+  "life_stage_category"
 ]
