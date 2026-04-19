@@ -176,6 +176,7 @@ PSM_CALIPER      = 0.01          # SD units of log-odds
 PSM_RANDOM_STATE = RANDOM_SEED
 
 USE_MATCHED_DATA_FOR_XLEARNER = False  # True → train on matched data
+XLEARNER_RETAINED_ONLY        = False  # True → train only on on_book_month9 == 1
 
 # ===========================================================
 # INVERSE PROBABILITY OF TREATMENT WEIGHTING (IPTW)

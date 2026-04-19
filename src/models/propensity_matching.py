@@ -301,7 +301,7 @@ class PropensityScoreMatching:
         X_matched = pd.concat([
             X_sub.iloc[matched_treated].assign(matched_binary_treatment=1),
             X_sub.iloc[matched_control].assign(matched_binary_treatment=0),
-        ], ignore_index=True)
+        ])
 
         n_before = valid.shape[0]
         n_after  = valid.sum()

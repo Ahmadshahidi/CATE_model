@@ -243,10 +243,11 @@ def main():
     t_step = _step_header(f"BIAS CORRECTION  [{bias_method.upper()}]", '2.5', start_time)
 
     # Initialise defaults — overridden below depending on method
-    X_for_xlearner   = X_step2
-    t_for_xlearner   = treatment
-    y_for_xlearner   = y_balance
-    sample_weight_xl = None          # IPTW weights (None → unweighted)
+    X_for_xlearner            = X_step2
+    t_for_xlearner            = treatment
+    y_for_xlearner            = y_balance
+    sample_weight_xl          = None          # IPTW weights (None → unweighted)
+    y_attrition_for_xlearner  = y_attrition
 
     # ------------------------------------------------------------------
     if bias_method == 'psm':
@@ -266,8 +267,10 @@ def main():
             print("\n  ℹ  USE_MATCHED_DATA_FOR_XLEARNER = True")
             print("     Building combined matched dataset for X-Learner ...")
 
-            X_for_xlearner = pd.DataFrame()
-            t_for_xlearner = pd.Series(dtype=int)
+            X_for_xlearner      = pd.DataFrame()
+            t_for_xlearner      = pd.Series(dtype=int)
+            y_balance_xl_list   = []
+            y_attrition_xl_list = []
 
             for arm_id, match_df in psm.matched_data.items():
                 feat_cols   = [c for c in match_df.columns
@@ -279,9 +282,11 @@ def main():
                     [X_for_xlearner, match_df[feat_cols]], ignore_index=True)
                 t_for_xlearner = pd.concat(
                     [t_for_xlearner, pd.Series(arm_ids_row)], ignore_index=True)
+                y_balance_xl_list.append(y_balance.loc[match_df.index].values)
+                y_attrition_xl_list.append(y_attrition.loc[match_df.index].values)
 
-            print("  ⚠  y_balance aligned from full dataset by treatment IDs (approximate).")
-            y_for_xlearner = y_balance.values[:len(X_for_xlearner)]
+            y_for_xlearner           = np.concatenate(y_balance_xl_list)
+            y_attrition_for_xlearner = pd.Series(np.concatenate(y_attrition_xl_list))
 
             print(f"  Matched dataset: {len(X_for_xlearner):,} rows  "
                   f"({len(X_for_xlearner)/len(X_step2)*100:.1f}% of original)")
@@ -334,6 +339,19 @@ def main():
         )
 
     _step_done(f"BIAS CORRECTION [{bias_method.upper()}]", t_step)
+
+    # Optional: restrict X-Learner training to retained customers only
+    if getattr(config, 'XLEARNER_RETAINED_ONLY', False):
+        retained_mask = np.array(y_attrition_for_xlearner) == 1
+        n_before = len(X_for_xlearner)
+        X_for_xlearner   = X_for_xlearner[retained_mask]
+        y_for_xlearner   = np.asarray(y_for_xlearner)[retained_mask]
+        t_for_xlearner   = np.asarray(t_for_xlearner)[retained_mask]
+        if sample_weight_xl is not None:
+            sample_weight_xl = np.asarray(sample_weight_xl)[retained_mask]
+        print(f"\n  XLEARNER_RETAINED_ONLY=True: "
+              f"{n_before:,} → {len(X_for_xlearner):,} rows "
+              f"({100*retained_mask.mean():.1f}% retained)")
 
     # ================================================================
     # MODEL 1: X-LEARNER  (3 offer arms vs. control)
