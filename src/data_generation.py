@@ -292,31 +292,75 @@ def _generate_categorical_features(named: dict, n: int,
     }
 
 
+# ---------------------------------------------------------------------------
+# Target columns that must NEVER contain NaN
+# ---------------------------------------------------------------------------
+_TARGET_COLS = ('opening_balance', 'on_book_month9', 'treatment', 'offer')
+
+
 def _inject_numeric_nan(df: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
     """
-    Inject NaN into selected numeric columns with realistic rates.
+    Inject NaN into numeric predictor columns with realistic rates.
 
-    Patterns
-    --------
-    mortgage_balance_estimated : 18% NaN  (renters often have no mortgage data)
-    checking_account_balance_est: 10% NaN (not all banks report balance)
-    estimated_net_worth         :  8% NaN (high-NW prospects often unreported)
-    credit_card_spend_monthly   : 12% NaN (credit card data availability)
-    liquid_assets_estimated     :  7% NaN (data availability)
+    Two tiers of injection:
+    1. Named domain columns — tailored missing-data rates that mirror
+       real Epsilon data patterns (mortgage data gaps, partial bank
+       reporting, etc.).
+    2. Generic padded columns (demo_XXXX, fin_XXXX, …) — a random 10%
+       sample of these gets a random MCAR rate (3–15%) applied, so the
+       downstream pipeline must handle sparse NaN throughout the feature
+       matrix, not just in a handful of named columns.
+
+    Target columns (opening_balance, on_book_month9, treatment, offer)
+    are explicitly excluded and will NEVER receive NaN.
+
+    Parameters
+    ----------
+    df  : pd.DataFrame  (numeric + categorical block columns)
+    rng : np.random.Generator
+
+    Returns
+    -------
+    pd.DataFrame  with NaN injected into predictor columns only.
     """
-    nan_spec = {
-        'mortgage_balance_estimated':  0.18,
+    n = len(df)
+    df = df.copy()
+
+    # ── Tier 1: named domain columns ────────────────────────────────
+    named_nan_spec = {
+        'mortgage_balance_estimated':   0.18,
         'checking_account_balance_est': 0.10,
         'estimated_net_worth':          0.08,
         'credit_card_spend_monthly':    0.12,
         'liquid_assets_estimated':      0.07,
+        'total_debt_estimated':         0.05,
+        'debit_card_spend_monthly':     0.06,
+        'revolving_utilization':        0.05,
     }
-    n = len(df)
-    df = df.copy()
-    for col, rate in nan_spec.items():
-        if col in df.columns:
+    for col, rate in named_nan_spec.items():
+        if col in df.columns and col not in _TARGET_COLS:
             nan_idx = rng.choice(n, size=int(rate * n), replace=False)
             df.loc[nan_idx, col] = np.nan
+
+    # ── Tier 2: generic padded columns (block_XXXX) ──────────────────
+    # Identify all generic numeric padded columns (prefixed block names)
+    pad_prefixes = ('demo_', 'fin_', 'beh_', 'geo_', 'psy_', 'noise_')
+    pad_cols = [
+        c for c in df.columns
+        if any(c.startswith(p) for p in pad_prefixes)
+        and c not in _TARGET_COLS
+        and df[c].dtype.kind in ('f', 'i', 'u')
+    ]
+
+    # Randomly select ~10% of padded columns to receive NaN
+    n_pad_nan = max(1, int(0.10 * len(pad_cols)))
+    chosen_pad = rng.choice(pad_cols, size=n_pad_nan, replace=False)
+
+    for col in chosen_pad:
+        rate = rng.uniform(0.03, 0.15)          # random 3–15% MCAR rate
+        nan_idx = rng.choice(n, size=int(rate * n), replace=False)
+        df.loc[nan_idx, col] = np.nan
+
     return df
 
 
@@ -590,6 +634,13 @@ def generate_epsilon_data() -> pd.DataFrame:
     for arm_id in sorted(config.TREATMENT_COMPONENTS):
         print(f"    Arm {arm_id} ({config.TREATMENTS[arm_id]:<8}): "
               f"{ret_by_arm[arm_id]:.1%}")
+
+    # ── Sanity check: target columns must never have NaN ─────────
+    for tgt in ('opening_balance', 'on_book_month9'):
+        assert df[tgt].isna().sum() == 0, (
+            f"Target column '{tgt}' contains NaN — check outcome generation."
+        )
+    print("  ✓ Target columns (opening_balance, on_book_month9) are NaN-free.")
 
     print("=" * 60 + "\n")
     return df

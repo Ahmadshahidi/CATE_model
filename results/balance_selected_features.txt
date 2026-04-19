@@ -1,12 +1,10 @@
-Balance Selected Features (9):
+Balance Selected Features (7):
 ============================================================
 
   channel_preference
-  geo_0002
   investment_propensity_score
   life_stage_category
   occupation_category
   region
-  remail
   risk_tier
   stipulation

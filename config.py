@@ -215,6 +215,19 @@ PSM_KEY_COVARIATES = [
 ]
 
 # ===========================================================
+# NUMERIC NaN IMPUTATION (propensity score / sklearn paths)
+# ===========================================================
+# Controls how numeric NaNs are filled in _encode_cats() before
+# passing data to logistic regression or XGBoost propensity models.
+# CatBoost paths are NOT affected (CatBoost handles NaNs natively).
+#
+#   'median'  → replace NaN with the column median  (default; robust to outliers)
+#   'mean'    → replace NaN with the column mean
+#   <number>  → replace NaN with that fixed value, e.g. 0 or -1
+# ===========================================================
+PS_NUMERIC_NAN_IMPUTE = 'median'   # 'median' | 'mean' | <number>
+
+# ===========================================================
 # FEATURE SELECTION PARAMETERS
 # ===========================================================
 # Step 1: Initial Pruning

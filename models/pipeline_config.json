@@ -1,5 +1,5 @@
 {
-  "saved_at": "2026-04-08T10:39:38.512119",
+  "saved_at": "2026-04-17T10:31:57.960888",
   "random_seed": 42,
   "treatment_components": {
     "0": 0,
@@ -89,6 +89,6 @@
     "channel_preference",
     "life_stage_category"
   ],
-  "n_balance_features": 9,
-  "n_attrition_features": 16
+  "n_balance_features": 7,
+  "n_attrition_features": 11
 }

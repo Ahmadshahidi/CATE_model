@@ -41,15 +41,37 @@ warnings.filterwarnings('ignore')
 # ---------------------------------------------------------------------------
 def _encode_cats(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Return a copy of *df* with all categorical / object columns replaced by
-    their integer codes (NaN → -1).  Used to prepare data for sklearn
-    estimators (StandardScaler, LogisticRegression, XGBoost) that cannot
-    handle non-numeric dtypes.
+    Return a copy of *df* ready for sklearn estimators
+    (StandardScaler, LogisticRegression, XGBoost):
+
+    1. Categorical / object columns → integer codes  (NaN → -1)
+    2. Numeric columns with NaN     → imputed per config.PS_NUMERIC_NAN_IMPUTE
+         'median'  → column median  (default)
+         'mean'    → column mean
+         <number>  → fixed constant (e.g. 0)
+
+    Both steps are required so that StandardScaler and linear models never
+    receive non-finite values.  CatBoost paths do NOT call this function.
     """
     out = df.copy()
+
+    # Step 1 — encode categoricals
     for col in out.columns:
         if pd.api.types.is_categorical_dtype(out[col]) or pd.api.types.is_object_dtype(out[col]):
             out[col] = pd.Categorical(out[col]).codes.astype('int16')
+
+    # Step 2 — impute remaining NaN in numeric columns
+    num_cols_with_nan = [c for c in out.columns if out[c].isna().any()]
+    if num_cols_with_nan:
+        strategy = config.PS_NUMERIC_NAN_IMPUTE
+        if strategy == 'median':
+            fill_values = out[num_cols_with_nan].median()
+        elif strategy == 'mean':
+            fill_values = out[num_cols_with_nan].mean()
+        else:
+            fill_values = float(strategy)
+        out[num_cols_with_nan] = out[num_cols_with_nan].fillna(fill_values)
+
     return out
 # ---------------------------------------------------------------------------
 

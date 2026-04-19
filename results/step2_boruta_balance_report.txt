@@ -7,19 +7,17 @@ percentile (perc)   : 100
 top_n (floor)       : None
 force_include       : ['risk_tier', 'region', 'occupation_category', 'channel_preference', 'life_stage_category']
 
-  Confirmed      : 4
+  Confirmed      : 2
   Tentative      : 0  (included in output)
-  Rejected       : 1432
+  Rejected       : 1434
   Added for Top-N: 0  (rescued rejected, hit top_n=None)
   Force-included : 5
-  Total output   : 9
+  Total output   : 7
 
 ----------------------------------------------------------------------
 CONFIRMED FEATURES:
 ----------------------------------------------------------------------
-  geo_0002                                            hit_rate=1.000
   investment_propensity_score                         hit_rate=1.000
-  remail                                              hit_rate=1.000
   stipulation                                         hit_rate=1.000
 
 ----------------------------------------------------------------------
@@ -739,6 +737,7 @@ REJECTED FEATURES:
   fin_0284                                            hit_rate=0.000
   geo_0000                                            hit_rate=0.000
   geo_0001                                            hit_rate=0.000
+  geo_0002                                            hit_rate=0.000
   geo_0003                                            hit_rate=0.000
   geo_0004                                            hit_rate=0.000
   geo_0005                                            hit_rate=0.000
@@ -1462,6 +1461,7 @@ REJECTED FEATURES:
   psy_0391                                            hit_rate=0.000
   psy_0394                                            hit_rate=0.000
   region                                              hit_rate=0.000
+  remail                                              hit_rate=0.000
   retirement_account_indicator                        hit_rate=0.000
   revolving_utilization                               hit_rate=0.000
   risk_tier                                           hit_rate=0.000

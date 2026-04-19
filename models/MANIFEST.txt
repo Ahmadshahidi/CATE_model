@@ -1,7 +1,7 @@
 ======================================================================
 UPLIFT MODELING PIPELINE — MODEL PACKAGE MANIFEST
 ======================================================================
-Generated  : 2026-04-08T10:39:38.512119
+Generated  : 2026-04-17T10:31:57.960888
 Directory  : /home/ahmad/CATE_Model/models
 
 ──────────────────────────────────────────────────────────────────────
@@ -11,10 +11,10 @@ DUAL FEATURE SELECTION PATHS
   shared Step-1 variance/correlation pruning:
 
   Balance path  → features selected against opening_balance
-                  9 features → X-Learner (CATE models + propensity)
+                  7 features → X-Learner (CATE models + propensity)
 
   Attrition path → features selected against on_book_month9
-                  16 features → AttritionModel (retention prob)
+                  11 features → AttritionModel (retention prob)
 
 ──────────────────────────────────────────────────────────────────────
 ARTEFACTS
@@ -28,30 +28,30 @@ ARTEFACTS
   Step-2 Boruta (Balance target)
     File    : step2_boruta_balance.joblib
     Details : n_trials=100, percentile=100
-            : Features selected: 9  → balance_feature_names.json
+            : Features selected: 7  → balance_feature_names.json
 
   Step-2 Boruta (Attrition target)
     File    : step2_boruta_attrition.joblib
     Details : n_trials=100, percentile=100
-            : Features selected: 16  → attrition_feature_names.json
+            : Features selected: 11  → attrition_feature_names.json
 
   X-Learner Uplift (CatBoostRegressor)
     File    : xlearner_uplift.joblib
     Details : Arms: [1, 2, 3, 4]
-            : Balance feature set: 9 features | Propensity: CatBoostClassifier
+            : Balance feature set: 7 features | Propensity: CatBoostClassifier
 
   Attrition Model (CatBoostClassifier)
     File    : attrition_model.joblib
     Details : Predicts P(on-book at month 9)
-            : Attrition feature set: 16 features
+            : Attrition feature set: 11 features
 
   Balance Feature Name List
     File    : balance_feature_names.json
-    Details : 9 features for X-Learner
+    Details : 7 features for X-Learner
 
   Attrition Feature Name List
     File    : attrition_feature_names.json
-    Details : 16 features for AttritionModel
+    Details : 11 features for AttritionModel
 
   Config Snapshot
     File    : pipeline_config.json

@@ -7,31 +7,26 @@ percentile (perc)   : 100
 top_n (floor)       : None
 force_include       : ['risk_tier', 'region', 'occupation_category', 'channel_preference', 'life_stage_category']
 
-  Confirmed      : 10
-  Tentative      : 1  (included in output)
-  Rejected       : 1425
+  Confirmed      : 6
+  Tentative      : 0  (included in output)
+  Rejected       : 1430
   Added for Top-N: 0  (rescued rejected, hit top_n=None)
   Force-included : 5
-  Total output   : 16
+  Total output   : 11
 
 ----------------------------------------------------------------------
 CONFIRMED FEATURES:
 ----------------------------------------------------------------------
   age                                                 hit_rate=1.000
-  checking_account_balance_est                        hit_rate=1.000
   credit_score_modeled                                hit_rate=1.000
   debt_to_income_ratio                                hit_rate=1.000
   direct_mail_responsiveness                          hit_rate=1.000
-  fin_0203                                            hit_rate=1.000
-  fin_0279                                            hit_rate=1.000
   homeowner_flag                                      hit_rate=1.000
-  noise_0248                                          hit_rate=1.000
   revolving_utilization                               hit_rate=1.000
 
 ----------------------------------------------------------------------
 TENTATIVE FEATURES  (included in output by default):
 ----------------------------------------------------------------------
-  geo_0160                                            hit_rate=0.500
 
 ----------------------------------------------------------------------
 FORCE-INCLUDED FEATURES  (always kept regardless of verdict):
@@ -355,6 +350,7 @@ REJECTED FEATURES:
   beh_0391                                            hit_rate=0.000
   branch_visit_frequency                              hit_rate=0.000
   channel_preference                                  hit_rate=0.000
+  checking_account_balance_est                        hit_rate=0.000
   credit_card_spend_monthly                           hit_rate=0.000
   debit_card_spend_monthly                            hit_rate=0.000
   demo_0000                                           hit_rate=0.000
@@ -675,6 +671,7 @@ REJECTED FEATURES:
   fin_0200                                            hit_rate=0.000
   fin_0201                                            hit_rate=0.000
   fin_0202                                            hit_rate=0.000
+  fin_0203                                            hit_rate=0.000
   fin_0206                                            hit_rate=0.000
   fin_0207                                            hit_rate=0.000
   fin_0208                                            hit_rate=0.000
@@ -732,6 +729,7 @@ REJECTED FEATURES:
   fin_0274                                            hit_rate=0.000
   fin_0277                                            hit_rate=0.000
   fin_0278                                            hit_rate=0.000
+  fin_0279                                            hit_rate=0.000
   fin_0280                                            hit_rate=0.000
   fin_0281                                            hit_rate=0.000
   fin_0282                                            hit_rate=0.000
@@ -867,6 +865,7 @@ REJECTED FEATURES:
   geo_0157                                            hit_rate=0.000
   geo_0158                                            hit_rate=0.000
   geo_0159                                            hit_rate=0.000
+  geo_0160                                            hit_rate=0.000
   geo_0162                                            hit_rate=0.000
   geo_0163                                            hit_rate=0.000
   geo_0165                                            hit_rate=0.000
@@ -1104,6 +1103,7 @@ REJECTED FEATURES:
   noise_0243                                          hit_rate=0.000
   noise_0245                                          hit_rate=0.000
   noise_0246                                          hit_rate=0.000
+  noise_0248                                          hit_rate=0.000
   noise_0249                                          hit_rate=0.000
   noise_0250                                          hit_rate=0.000
   noise_0251                                          hit_rate=0.000
