@@ -236,7 +236,7 @@ VARIANCE_THRESHOLD    = 0.01   # Remove features below this variance
 CORRELATION_THRESHOLD = 0.95   # Remove one of two correlated features
 
 # Step 2: Boruta-SHAP
-BORUTA_N_TRIALS      = 100
+BORUTA_N_TRIALS      = 50
 BORUTA_PERCENTILE    = 100     # Use max of shadow features
 BORUTA_RANDOM_STATE  = RANDOM_SEED
 

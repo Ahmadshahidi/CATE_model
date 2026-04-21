@@ -226,14 +226,14 @@ class BorutaSHAP:
 
         if self.task == 'regression':
             model = lgb.LGBMRegressor(
-                n_estimators=100,
+                n_estimators=50,
                 random_state=self.random_state,
                 n_jobs=-1,
                 verbosity=-1,
             )
         else:
             model = lgb.LGBMClassifier(
-                n_estimators=100,
+                n_estimators=50,
                 random_state=self.random_state,
                 n_jobs=-1,
                 verbosity=-1,
@@ -241,7 +241,7 @@ class BorutaSHAP:
 
         selector = Leshy(
             estimator    = model,
-            n_estimators = 100,
+            n_estimators = 50,
             perc         = self.percentile,
             alpha        = 0.05,
             importance   = 'shap',

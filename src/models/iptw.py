@@ -435,6 +435,17 @@ class IPTWWeighting:
 
                 col = X_sub[:, j].astype(float)
 
+                # Impute numeric NaN using the same strategy as _encode_cats()
+                if np.isnan(col).any():
+                    strategy = config.PS_NUMERIC_NAN_IMPUTE
+                    if strategy == 'median':
+                        fill = np.nanmedian(col)
+                    elif strategy == 'mean':
+                        fill = np.nanmean(col)
+                    else:
+                        fill = float(strategy)
+                    col = np.where(np.isnan(col), fill, col)
+
                 # Unweighted SMD
                 mu_t_uw = col[t_idx].mean()
                 mu_c_uw = col[c_idx].mean()
