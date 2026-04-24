@@ -1,14 +1,18 @@
-Attrition Selected Features (11):
+Attrition Selected Features (15):
 ============================================================
 
   age
+  beh_0330
   channel_preference
+  checking_account_balance_est
   credit_score_modeled
+  debit_card_spend_monthly
   debt_to_income_ratio
   direct_mail_responsiveness
-  homeowner_flag
   life_stage_category
+  mortgage_balance_estimated
   occupation_category
   region
   revolving_utilization
   risk_tier
+  stipulation

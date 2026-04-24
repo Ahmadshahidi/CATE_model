@@ -4,13 +4,12 @@ Offers: $100, $400, $500  + Control
 
 Net Value per arm = P(on_book) × (Baseline + CATE)
                   − OFFER_COST_RATE × offer
-                  − STIPULATION_COST × scenario['stipulation']
-                  − REMAIL_COST      × scenario['remail']
+                  − REMAIL_COST     × scenario['remail']
 
-remail and stipulation are no longer treatment arms — they are toggled
-via OPTIMIZATION_SCENARIOS in config.py.  For each scenario the model
-predicts counterfactual CATEs (feature override) and computes scenario-
-adjusted costs, returning a full comparison table across scenarios.
+remail is toggled via OPTIMIZATION_SCENARIOS in config.py.
+stipulation is a 5-level categorical predictor with zero cost; it is not
+toggled in scenarios.  For each scenario the model predicts counterfactual
+CATEs (remail feature override) and computes scenario-adjusted costs.
 """
 
 import numpy as np
@@ -42,11 +41,8 @@ def _arm_base_cost(arm_id: int) -> float:
 
 
 def _scenario_extra_cost(scenario: dict) -> float:
-    """Additional cost from remail / stipulation flags in a scenario."""
-    return (
-        config.STIPULATION_COST * scenario.get('stipulation', 0)
-        + config.REMAIL_COST    * scenario.get('remail', 0)
-    )
+    """Additional cost from remail flag in a scenario (stipulation cost is zero)."""
+    return config.REMAIL_COST * scenario.get('remail', 0)
 
 
 def _arm_cost(arm_id: int, scenario: dict = None) -> float:
@@ -67,7 +63,7 @@ class NetValueOptimizer:
         # Single run (observed features / no scenario override):
         optimizer.generate_full_report(insights_df, save_dir=...)
 
-        # Scenario analysis (remail / stipulation ON / OFF combinations):
+        # Scenario analysis (remail ON / OFF):
         optimizer.run_all_scenarios(X_features, insights_df, xlearner_model, save_dir=...)
     """
 
@@ -91,8 +87,8 @@ class NetValueOptimizer:
             CATE columns (cate_treatment_{arm_id}).  If None, the columns
             are read from df directly.
         scenario : dict, optional
-            {'remail': 0/1, 'stipulation': 0/1}
-            When supplied, arm costs include remail/stipulation charges.
+            {'remail': 0/1}
+            When supplied, arm costs include remail charge.
         baseline_balance_col : str
         retention_col : str
 
@@ -300,7 +296,209 @@ class NetValueOptimizer:
         }
 
     # ------------------------------------------------------------------
-    # SCENARIO ANALYSIS
+    # PER-PROSPECT REMAIL OPTIMIZATION
+    # ------------------------------------------------------------------
+    def run_remail_optimization(self, X_features, insights_df, xlearner_model,
+                                save_dir=None):
+        """
+        Per-prospect joint optimization over (offer arm × remail flag).
+
+        For each prospect the (arm, remail) combination that maximises
+        individual net value is selected.  Prospects where the remail CATE
+        lift exceeds REMAIL_COST are assigned remail=1; the rest get remail=0.
+
+        This strictly dominates any global remail policy because it achieves
+        at least as much NV as either "everyone gets remail" or "nobody does".
+
+        Parameters
+        ----------
+        X_features : pd.DataFrame
+            Feature matrix (same columns as used during fit).
+        insights_df : pd.DataFrame
+            Must contain opening_balance_actual and retention_predicted_proba.
+        xlearner_model : XLearnerUplift
+            Fitted X-Learner instance.
+        save_dir : str, optional
+            Directory for CSV and chart outputs.
+
+        Returns
+        -------
+        pd.DataFrame
+            insights_df enriched with optimal_offer_arm, optimal_remail_flag,
+            optimal_offer_name, optimal_net_value, net_value_gain_vs_ctrl.
+        """
+        print("\n" + "="*70)
+        print("PER-PROSPECT REMAIL OPTIMIZATION")
+        print("="*70)
+
+        # 1. Predict CATEs under both remail states
+        print("\n  Predicting CATEs under remail=0 ...")
+        cates_r0 = xlearner_model.predict_cate_scenario(X_features, {'remail': 0})
+        print("  Predicting CATEs under remail=1 ...")
+        cates_r1 = xlearner_model.predict_cate_scenario(X_features, {'remail': 1})
+
+        df       = insights_df.copy()
+        p_ret    = df['retention_predicted_proba'].values
+        baseline = df['opening_balance_actual'].values
+
+        # 2. Compute NV for every (arm, remail) combination
+        arm_ids = sorted(config.TREATMENT_COMPONENTS.keys())
+        combos  = []   # (arm_id, remail_flag, temp_col)
+
+        # Control: remail not applicable
+        nv_ctrl = p_ret * baseline
+        df['_nv_0_r0'] = nv_ctrl
+        combos.append((0, 0, '_nv_0_r0'))
+
+        for arm_id in arm_ids:
+            if arm_id == 0:
+                continue
+            offer     = config.TREATMENT_COMPONENTS[arm_id]
+            base_cost = config.OFFER_COST_RATE * offer
+            cate_col  = f'cate_treatment_{arm_id}'
+
+            # remail = 0
+            nv_r0 = p_ret * (baseline + cates_r0[cate_col].values) - base_cost
+            col_r0 = f'_nv_{arm_id}_r0'
+            df[col_r0] = nv_r0
+            combos.append((arm_id, 0, col_r0))
+
+            # remail = 1
+            nv_r1 = (p_ret * (baseline + cates_r1[cate_col].values)
+                     - base_cost - config.REMAIL_COST)
+            col_r1 = f'_nv_{arm_id}_r1'
+            df[col_r1] = nv_r1
+            combos.append((arm_id, 1, col_r1))
+
+        # 3. Per-prospect argmax over all (arm, remail) combinations
+        combo_cols = [c for _, _, c in combos]
+        nv_matrix  = df[combo_cols].values
+        best_idx   = np.argmax(nv_matrix, axis=1)
+
+        df['optimal_offer_arm']      = [combos[i][0] for i in best_idx]
+        df['optimal_remail_flag']    = [combos[i][1] for i in best_idx]
+        df['optimal_offer_name']     = [config.TREATMENTS[combos[i][0]]
+                                        for i in best_idx]
+        df['optimal_net_value']      = nv_matrix[np.arange(len(df)), best_idx]
+        df['net_value_gain_vs_ctrl'] = df['optimal_net_value'] - nv_ctrl
+
+        # 4. Benchmark comparisons
+        no_r_cols  = [c for aid, rf, c in combos if rf == 0]
+        all_r_cols = ['_nv_0_r0'] + [c for aid, rf, c in combos if rf == 1]
+        nv_opt       = df['optimal_net_value'].sum()
+        nv_no_remail = df[no_r_cols].max(axis=1).sum()
+        nv_all_remail= df[all_r_cols].max(axis=1).sum()
+        nv_ctrl_total= nv_ctrl.sum()
+
+        n_remail = int((df['optimal_remail_flag'] == 1).sum())
+        pct_r    = 100 * n_remail / len(df)
+
+        print(f"\n  Remail assigned to : {n_remail:,} prospects  ({pct_r:.1f}%)")
+        print(f"\n  Portfolio NV comparison:")
+        print(f"    Per-prospect remail opt   : ${nv_opt:,.2f}")
+        print(f"    Optimal offer, no remail  : ${nv_no_remail:,.2f}")
+        print(f"    Optimal offer, all remail : ${nv_all_remail:,.2f}")
+        print(f"    No offer (control)        : ${nv_ctrl_total:,.2f}")
+        print(f"\n  Gain from per-prospect optimization:")
+        print(f"    vs. no remail  : ${nv_opt - nv_no_remail:+,.2f}")
+        print(f"    vs. all remail : ${nv_opt - nv_all_remail:+,.2f}")
+        print(f"    vs. no offer   : ${nv_opt - nv_ctrl_total:+,.2f}")
+
+        print(f"\n  Optimal offer distribution:")
+        for arm_id in arm_ids:
+            arm_name = config.TREATMENTS[arm_id]
+            mask     = df['optimal_offer_arm'] == arm_id
+            n_total  = int(mask.sum())
+            n_r1     = int(((df['optimal_offer_arm'] == arm_id) &
+                             (df['optimal_remail_flag'] == 1)).sum())
+            pct      = 100 * n_total / len(df)
+            if arm_id == 0:
+                print(f"    {arm_name:<12}: {n_total:>6,}  ({pct:>5.1f}%)")
+            else:
+                print(f"    {arm_name:<12}: {n_total:>6,}  ({pct:>5.1f}%)  "
+                      f"[no remail: {n_total - n_r1:,}  |  remail: {n_r1:,}]")
+
+        # Drop internal temp NV columns
+        df.drop(columns=combo_cols, inplace=True)
+
+        self.results_df = df
+
+        if save_dir:
+            csv_path = os.path.join(save_dir, 'remail_optimization_results.csv')
+            df.to_csv(csv_path, index=False)
+            print(f"\n  Results saved to: {csv_path}")
+
+            self._plot_remail_comparison(
+                nv_opt, nv_no_remail, nv_all_remail, nv_ctrl_total, save_dir)
+            self._plot_remail_offer_distribution(df, arm_ids, save_dir)
+
+        return df
+
+    def _plot_remail_comparison(self, nv_opt, nv_no_remail,
+                                nv_all_remail, nv_ctrl, save_dir):
+        """Bar chart: total portfolio NV for each remail strategy."""
+        fig, ax = plt.subplots(figsize=(10, 5))
+
+        labels = ['Per-Prospect\nRemail Opt.',
+                  'No Remail\n(Opt. Offer)',
+                  'All Remail\n(Opt. Offer)',
+                  'No Offer\n(Control)']
+        values = [nv_opt, nv_no_remail, nv_all_remail, nv_ctrl]
+        colors = ['#2E86AB', '#A8DADC', '#457B9D', '#E63946']
+
+        bars = ax.bar(labels, [v / 1e6 for v in values], color=colors)
+        ax.set_ylabel('Total Portfolio Net Value ($ millions)', fontsize=11)
+        ax.set_title('Per-Prospect Remail Optimization vs. Benchmarks',
+                     fontsize=13, fontweight='bold')
+        ax.grid(True, alpha=0.3, axis='y')
+        for bar, v in zip(bars, values):
+            h = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width() / 2, h,
+                    f'${h:.2f}M', ha='center', va='bottom', fontsize=9)
+
+        plt.tight_layout()
+        path = os.path.join(save_dir, 'remail_optimization_comparison.png')
+        plt.savefig(path, dpi=150, bbox_inches='tight')
+        print(f"  Remail comparison chart saved: {path}")
+        plt.close()
+
+    def _plot_remail_offer_distribution(self, df, arm_ids, save_dir):
+        """Stacked bar chart: prospects per offer arm, split by remail flag."""
+        fig, ax = plt.subplots(figsize=(max(8, len(arm_ids) * 1.8), 5))
+        cmap = plt.get_cmap('tab10')
+
+        arm_names = [config.TREATMENTS[a] for a in arm_ids]
+        n_r0 = [int(((df['optimal_offer_arm'] == a) &
+                      (df['optimal_remail_flag'] == 0)).sum()) for a in arm_ids]
+        n_r1 = [int(((df['optimal_offer_arm'] == a) &
+                      (df['optimal_remail_flag'] == 1)).sum()) for a in arm_ids]
+
+        x = range(len(arm_ids))
+        ax.bar(x, n_r0, label='No Remail', color='#A8DADC')
+        ax.bar(x, n_r1, bottom=n_r0, label='Remail', color='#2E86AB')
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(arm_names, fontsize=10)
+        ax.set_ylabel('Number of Prospects', fontsize=11)
+        ax.set_title('Optimal Offer Distribution by Remail Assignment',
+                     fontsize=13, fontweight='bold')
+        ax.legend(fontsize=10)
+        ax.grid(True, alpha=0.3, axis='y')
+
+        for xi, (r0, r1) in enumerate(zip(n_r0, n_r1)):
+            total = r0 + r1
+            if total > 0:
+                ax.text(xi, total, f'{total:,}',
+                        ha='center', va='bottom', fontsize=8)
+
+        plt.tight_layout()
+        path = os.path.join(save_dir, 'remail_offer_distribution.png')
+        plt.savefig(path, dpi=150, bbox_inches='tight')
+        print(f"  Remail offer distribution chart saved: {path}")
+        plt.close()
+
+    # ------------------------------------------------------------------
+    # SCENARIO ANALYSIS  (kept for backward compatibility)
     # ------------------------------------------------------------------
     def run_all_scenarios(self, X_features, insights_df, xlearner_model, save_dir=None):
         """
@@ -331,7 +529,7 @@ class NetValueOptimizer:
             One row per scenario with portfolio-level metrics.
         """
         print("\n" + "="*70)
-        print("SCENARIO ANALYSIS  (remail × stipulation toggles)")
+        print("SCENARIO ANALYSIS  (remail toggle)")
         print("="*70)
 
         scenario_rows   = []
@@ -377,7 +575,6 @@ class NetValueOptimizer:
             row = {
                 'scenario':                scen_name,
                 'remail':                  scenario.get('remail', 0),
-                'stipulation':             scenario.get('stipulation', 0),
                 'total_net_value':         total_nv,
                 'avg_net_value':           avg_nv,
                 'lift_vs_control':         lift,
@@ -396,7 +593,7 @@ class NetValueOptimizer:
         print("\n" + "="*70)
         print("SCENARIO COMPARISON SUMMARY")
         print("="*70)
-        display_cols = ['scenario', 'remail', 'stipulation',
+        display_cols = ['scenario', 'remail',
                         'total_net_value', 'avg_net_value',
                         'lift_vs_control', 'extra_cost_per_prospect']
         print(scen_summary[display_cols].to_string(index=False))
@@ -457,7 +654,7 @@ class NetValueOptimizer:
             ax.text(bar.get_x() + bar.get_width() / 2, h, f'${h:,.0f}K',
                     ha='center', va='bottom', fontsize=9)
 
-        plt.suptitle('Scenario Analysis: remail × stipulation toggles',
+        plt.suptitle('Scenario Analysis: remail toggle',
                      fontsize=13, fontweight='bold')
         plt.tight_layout()
 

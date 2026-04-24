@@ -1,7 +1,7 @@
 ======================================================================
 UPLIFT MODELING PIPELINE — MODEL PACKAGE MANIFEST
 ======================================================================
-Generated  : 2026-04-19T10:49:46.187389
+Generated  : 2026-04-23T11:39:12.155683
 Directory  : /home/ahmad/CATE_Model/models
 
 ──────────────────────────────────────────────────────────────────────
@@ -11,10 +11,10 @@ DUAL FEATURE SELECTION PATHS
   shared Step-1 variance/correlation pruning:
 
   Balance path  → features selected against opening_balance
-                  7 features → X-Learner (CATE models + propensity)
+                  16 features → X-Learner (CATE models + propensity)
 
   Attrition path → features selected against on_book_month9
-                  11 features → AttritionModel (retention prob)
+                  15 features → AttritionModel (retention prob)
 
 ──────────────────────────────────────────────────────────────────────
 ARTEFACTS
@@ -23,35 +23,35 @@ ARTEFACTS
   Step-1 Pruner
     File    : step1_pruner.joblib
     Details : Variance threshold=0.01, Correlation threshold=0.95
-            : Removed (variance): 198, (correlation): 174
+            : Removed (variance): 199, (correlation): 174
 
   Step-2 Boruta (Balance target)
     File    : step2_boruta_balance.joblib
-    Details : n_trials=100, percentile=100
-            : Features selected: 7  → balance_feature_names.json
+    Details : n_trials=50, percentile=100
+            : Features selected: 16  → balance_feature_names.json
 
   Step-2 Boruta (Attrition target)
     File    : step2_boruta_attrition.joblib
-    Details : n_trials=100, percentile=100
-            : Features selected: 11  → attrition_feature_names.json
+    Details : n_trials=50, percentile=100
+            : Features selected: 15  → attrition_feature_names.json
 
   X-Learner Uplift (CatBoostRegressor)
     File    : xlearner_uplift.joblib
     Details : Arms: [1, 2, 3, 4]
-            : Balance feature set: 7 features | Propensity: CatBoostClassifier
+            : Balance feature set: 16 features | Propensity: CatBoostClassifier
 
   Attrition Model (CatBoostClassifier)
     File    : attrition_model.joblib
     Details : Predicts P(on-book at month 9)
-            : Attrition feature set: 11 features
+            : Attrition feature set: 15 features
 
   Balance Feature Name List
     File    : balance_feature_names.json
-    Details : 7 features for X-Learner
+    Details : 16 features for X-Learner
 
   Attrition Feature Name List
     File    : attrition_feature_names.json
-    Details : 11 features for AttritionModel
+    Details : 15 features for AttritionModel
 
   Config Snapshot
     File    : pipeline_config.json
@@ -69,9 +69,9 @@ TREATMENT / OFFER DESIGN
 ──────────────────────────────────────────────────────────────────────
 COST PARAMETERS
 ──────────────────────────────────────────────────────────────────────
-  Offer cost rate  : 0.5 (× offer $)
-  Stipulation cost : $5.0 per prospect
+  Offer cost rate  : 0.6 (× offer $)
   Remail cost      : $3.0 per prospect
+  Stipulation cost : $0 (zero)
 
 ──────────────────────────────────────────────────────────────────────
 DECILE TARGETING

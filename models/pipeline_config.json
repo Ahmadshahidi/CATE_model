@@ -1,5 +1,5 @@
 {
-  "saved_at": "2026-04-19T10:49:46.187389",
+  "saved_at": "2026-04-23T11:39:12.155683",
   "random_seed": 42,
   "treatment_components": {
     "0": 0,
@@ -21,8 +21,7 @@
     500,
     1000
   ],
-  "offer_cost_rate": 0.5,
-  "stipulation_cost": 5.0,
+  "offer_cost_rate": 0.6,
   "remail_cost": 3.0,
   "n_deciles": 10,
   "top_n_deciles": 3,
@@ -71,7 +70,7 @@
   },
   "variance_threshold": 0.01,
   "correlation_threshold": 0.95,
-  "boruta_n_trials": 100,
+  "boruta_n_trials": 50,
   "boruta_percentile": 100,
   "boruta_balance_top_n": null,
   "boruta_attrition_top_n": null,
@@ -80,15 +79,17 @@
     "region",
     "occupation_category",
     "channel_preference",
-    "life_stage_category"
+    "life_stage_category",
+    "stipulation"
   ],
   "boruta_attrition_force_include": [
     "risk_tier",
     "region",
     "occupation_category",
     "channel_preference",
-    "life_stage_category"
+    "life_stage_category",
+    "stipulation"
   ],
-  "n_balance_features": 7,
-  "n_attrition_features": 11
+  "n_balance_features": 16,
+  "n_attrition_features": 15
 }

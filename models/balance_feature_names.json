@@ -1,9 +1,18 @@
 [
-  "investment_propensity_score",
-  "stipulation",
+  "total_debt_estimated",
+  "fin_0128",
+  "fin_0206",
+  "beh_0106",
+  "beh_0279",
+  "psy_0086",
+  "psy_0182",
+  "noise_0047",
+  "noise_0223",
+  "remail",
   "risk_tier",
   "region",
   "occupation_category",
   "channel_preference",
-  "life_stage_category"
+  "life_stage_category",
+  "stipulation"
 ]

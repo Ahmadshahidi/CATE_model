@@ -2,26 +2,29 @@
 STEP 2: LESHY (arfs) FEATURE SELECTION REPORT
 ======================================================================
 
-n_trials (max_iter) : 100
+n_trials (max_iter) : 50
 percentile (perc)   : 100
 top_n (floor)       : None
-force_include       : ['risk_tier', 'region', 'occupation_category', 'channel_preference', 'life_stage_category']
+force_include       : ['risk_tier', 'region', 'occupation_category', 'channel_preference', 'life_stage_category', 'stipulation']
 
-  Confirmed      : 6
+  Confirmed      : 9
   Tentative      : 0  (included in output)
-  Rejected       : 1430
+  Rejected       : 1426
   Added for Top-N: 0  (rescued rejected, hit top_n=None)
-  Force-included : 5
-  Total output   : 11
+  Force-included : 6
+  Total output   : 15
 
 ----------------------------------------------------------------------
 CONFIRMED FEATURES:
 ----------------------------------------------------------------------
   age                                                 hit_rate=1.000
+  beh_0330                                            hit_rate=1.000
+  checking_account_balance_est                        hit_rate=1.000
   credit_score_modeled                                hit_rate=1.000
+  debit_card_spend_monthly                            hit_rate=1.000
   debt_to_income_ratio                                hit_rate=1.000
   direct_mail_responsiveness                          hit_rate=1.000
-  homeowner_flag                                      hit_rate=1.000
+  mortgage_balance_estimated                          hit_rate=1.000
   revolving_utilization                               hit_rate=1.000
 
 ----------------------------------------------------------------------
@@ -36,6 +39,7 @@ FORCE-INCLUDED FEATURES  (always kept regardless of verdict):
   occupation_category                                 hit_rate=0.000  [rejected]
   channel_preference                                  hit_rate=0.000  [rejected]
   life_stage_category                                 hit_rate=0.000  [rejected]
+  stipulation                                         hit_rate=0.000  [rejected]
 
 ----------------------------------------------------------------------
 REJECTED FEATURES:
@@ -298,7 +302,6 @@ REJECTED FEATURES:
   beh_0326                                            hit_rate=0.000
   beh_0327                                            hit_rate=0.000
   beh_0329                                            hit_rate=0.000
-  beh_0330                                            hit_rate=0.000
   beh_0331                                            hit_rate=0.000
   beh_0332                                            hit_rate=0.000
   beh_0334                                            hit_rate=0.000
@@ -350,9 +353,7 @@ REJECTED FEATURES:
   beh_0391                                            hit_rate=0.000
   branch_visit_frequency                              hit_rate=0.000
   channel_preference                                  hit_rate=0.000
-  checking_account_balance_est                        hit_rate=0.000
   credit_card_spend_monthly                           hit_rate=0.000
-  debit_card_spend_monthly                            hit_rate=0.000
   demo_0000                                           hit_rate=0.000
   demo_0001                                           hit_rate=0.000
   demo_0002                                           hit_rate=0.000
@@ -895,6 +896,7 @@ REJECTED FEATURES:
   geo_0195                                            hit_rate=0.000
   geo_0196                                            hit_rate=0.000
   geo_0197                                            hit_rate=0.000
+  homeowner_flag                                      hit_rate=0.000
   household_size                                      hit_rate=0.000
   investment_account_indicator                        hit_rate=0.000
   investment_propensity_score                         hit_rate=0.000
@@ -904,7 +906,6 @@ REJECTED FEATURES:
   liquid_assets_estimated                             hit_rate=0.000
   marital_status                                      hit_rate=0.000
   mobile_banking_activity                             hit_rate=0.000
-  mortgage_balance_estimated                          hit_rate=0.000
   noise_0000                                          hit_rate=0.000
   noise_0002                                          hit_rate=0.000
   noise_0003                                          hit_rate=0.000
@@ -1134,7 +1135,6 @@ REJECTED FEATURES:
   noise_0285                                          hit_rate=0.000
   noise_0286                                          hit_rate=0.000
   noise_0287                                          hit_rate=0.000
-  noise_0288                                          hit_rate=0.000
   noise_0289                                          hit_rate=0.000
   noise_0290                                          hit_rate=0.000
   noise_0291                                          hit_rate=0.000

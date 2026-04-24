@@ -1,10 +1,19 @@
-Balance Selected Features (7):
+Balance Selected Features (16):
 ============================================================
 
+  beh_0106
+  beh_0279
   channel_preference
-  investment_propensity_score
+  fin_0128
+  fin_0206
   life_stage_category
+  noise_0047
+  noise_0223
   occupation_category
+  psy_0086
+  psy_0182
   region
+  remail
   risk_tier
   stipulation
+  total_debt_estimated

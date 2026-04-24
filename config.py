@@ -1,7 +1,7 @@
 # Configuration for Incremental Campaign Uplift Modeling Project
 # Treatment Design: offer amounts only (configurable)
-# remail and stipulation are treated as predictors / covariates,
-# not as treatment arms. Optimization runs scenarios with remail/stipulation ON/OFF.
+# remail is treated as a predictor / covariate and toggled in optimization scenarios.
+# stipulation is a 5-level categorical predictor; cost is zero and it is not toggled.
 
 import os
 
@@ -40,9 +40,10 @@ RANDOM_SEED = 42
 # │  output columns) is derived automatically.              │
 # └─────────────────────────────────────────────────────────┘
 #
-# remail and stipulation are NOT treatment arms —
-# they are covariates/predictors in the model and are toggled
+# remail is NOT a treatment arm — it is a covariate/predictor toggled
 # via OPTIMIZATION_SCENARIOS at the optimization step.
+# stipulation is a 5-level categorical covariate; its cost is zero and
+# it cannot be globally toggled (it varies per prospect independently).
 #
 # Treatment ID 0 is always the control arm.
 # ===========================================================
@@ -89,38 +90,56 @@ assert len(TREATMENT_PROBS) == len(TREATMENT_COMPONENTS), \
      "set TREATMENT_PROBS = None for automatic equal allocation.")
 
 # ===========================================================
+# STIPULATION LEVELS
+# ===========================================================
+# stipulation is a 5-level categorical predictor assigned per
+# prospect.  The same offer arm can receive different stipulation
+# levels.  Cost is zero; stipulation is not toggled in scenarios.
+# Rename levels here to match your business nomenclature.
+# ===========================================================
+
+STIPULATION_LEVELS = ['none', 'basic', 'standard', 'enhanced', 'premium']
+
+# ===========================================================
 # OPTIMIZATION SCENARIOS
 # ===========================================================
 # In the optimization step we run the net-value optimizer for
-# each scenario defined here.  remail and stipulation are set
-# globally for the entire mailing in each scenario.
+# each scenario defined here.  remail is set globally for the
+# entire mailing in each scenario.  stipulation is excluded —
+# it varies per prospect and has zero cost.
 #
 # Keys   : short scenario label (used in output files / charts)
-# Values : dict with 'remail' and 'stipulation' flags (0 or 1)
+# Values : dict with 'remail' flag (0 or 1)
 # ===========================================================
 
 OPTIMIZATION_SCENARIOS = {
-    'no_remail_no_stip':  {'remail': 0, 'stipulation': 0},
-    'remail_on':          {'remail': 1, 'stipulation': 0},
-    'stipulation_on':     {'remail': 0, 'stipulation': 1},
-    'both_on':            {'remail': 1, 'stipulation': 1},
+    'no_remail': {'remail': 0},
+    'remail_on': {'remail': 1},
 }
 
 # ===========================================================
 # COST PARAMETERS
 # ===========================================================
-OFFER_COST_RATE  = 0.5   # 10% of the offer dollar amount
-STIPULATION_COST = 5.0    # Fixed $5 per prospect when stipulation = 1
-REMAIL_COST      = 3.0    # Fixed $3 per prospect when remail = 1
+OFFER_COST_RATE  = 0.60   # 10% of the offer dollar amount
+REMAIL_COST      = 3.0   # Fixed $3 per prospect when remail = 1
+# stipulation cost is zero — no entry needed
 
 # ===========================================================
 # TREATMENT EFFECT PARAMETERS (data generation)
 # ===========================================================
-# remail / stipulation boost the offer effect (multiplicative).
-# These drive the DGP so the model can learn the interactions
-# from the predictor set.
-STIPULATION_EFFECT_BOOST = 0.10   # +10% of base offer effect
-REMAIL_EFFECT_BOOST      = 0.05   # +5% of base offer effect
+# remail boosts the offer effect (multiplicative).
+# stipulation has a graded ordinal effect keyed to STIPULATION_LEVELS.
+REMAIL_EFFECT_BOOST = 0.05   # +5% of base offer effect
+
+# Ordinal CATE multiplier per stipulation level (same order as STIPULATION_LEVELS).
+# Each value is added to the prospect's CATE as a fraction of the base CATE.
+STIPULATION_EFFECT_BY_LEVEL = {
+    'none':     0.00,
+    'basic':    0.05,
+    'standard': 0.10,
+    'enhanced': 0.15,
+    'premium':  0.20,
+}
 
 # ===========================================================
 # BIAS CORRECTION METHOD
@@ -165,7 +184,7 @@ BIAS_CORRECTION_METHOD = 'psm'   # 'psm' | 'iptw' | 'none'
 #                 xgboost package)
 #
 # PSM_CALIPER : max allowed difference in propensity score
-#               (in SD units of the log-odds score)
+#              (in SD units of the log-odds score)
 # USE_MATCHED_DATA_FOR_XLEARNER : if True, X-Learner trains on
 #               PSM-matched data instead of the full dataset.
 # PSM_KEY_COVARIATES : highlighted in covariate balance plots.
@@ -293,6 +312,7 @@ FORCE_INCLUDE_CATEGORICAL = [
     'occupation_category',  # 8 broad occupational groups
     'channel_preference',   # Mail / Online / Branch / Mobile
     'life_stage_category',  # Young Single / Young Family / Mature Family / ...
+    'stipulation',          # 5-level categorical campaign variable
     # 'state',              # uncomment to also force-include the 50-state column
 ]
 

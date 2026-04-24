@@ -5,11 +5,11 @@ STEP 1: INITIAL PRUNING REPORT
 Variance threshold    : 0.01
 Correlation threshold : 0.95
 
-Total numeric features removed : 372
-  Via variance filter     : 198
+Total numeric features removed : 373
+  Via variance filter     : 199
   Via correlation filter  : 174
-Categorical features (pass-through): 6
-Total features retained : 1436
+Categorical features (pass-through): 7
+Total features retained : 1435
 
 ──────────────────────────────────────────────────────────────────────
 REMOVED — Near-constant numeric (variance < 0.01):
@@ -165,6 +165,7 @@ REMOVED — Near-constant numeric (variance < 0.01):
   noise_0274
   noise_0279
   noise_0281
+  noise_0288
   noise_0298
   psy_0010
   psy_0012
@@ -400,6 +401,7 @@ CATEGORICAL FEATURES PASSED THROUGH UNCHANGED:
   region
   risk_tier
   state
+  stipulation
 
 ──────────────────────────────────────────────────────────────────────
 RETAINED FEATURES:
@@ -1503,7 +1505,6 @@ RETAINED FEATURES:
   noise_0285
   noise_0286
   noise_0287
-  noise_0288
   noise_0289
   noise_0290
   noise_0291

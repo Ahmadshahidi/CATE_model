@@ -270,13 +270,14 @@ class XLearnerUplift:
 
     def predict_cate_scenario(self, X: pd.DataFrame, scenario: dict) -> pd.DataFrame:
         """
-        Predict CATEs after overriding remail / stipulation columns
-        with the values in ``scenario``.
+        Predict CATEs after overriding the remail column with the value
+        in ``scenario``.  stipulation is not overridden (5-level categorical,
+        zero cost, varies per prospect).
 
         Parameters
         ----------
         X        : pd.DataFrame  Feature matrix.
-        scenario : dict          e.g. {'remail': 1, 'stipulation': 0}
+        scenario : dict          e.g. {'remail': 1}
 
         Returns
         -------

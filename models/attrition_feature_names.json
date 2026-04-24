@@ -1,13 +1,17 @@
 [
   "age",
-  "homeowner_flag",
   "credit_score_modeled",
+  "mortgage_balance_estimated",
   "revolving_utilization",
+  "checking_account_balance_est",
   "debt_to_income_ratio",
   "direct_mail_responsiveness",
+  "debit_card_spend_monthly",
+  "beh_0330",
   "risk_tier",
   "region",
   "occupation_category",
   "channel_preference",
-  "life_stage_category"
+  "life_stage_category",
+  "stipulation"
 ]

@@ -9,7 +9,8 @@ Generates a dataset that mimics the structure of a real Epsilon prospect file:
   - Realistic NaN injection in selected numeric AND categorical columns
     (MCAR / MAR patterns, 5-18% missing rates)
   - 4 treatment arms: Control, $100, $400, $500 offer
-  - remail and stipulation as additional prospect-level covariates
+  - remail as an additional binary prospect-level covariate
+  - stipulation as a 5-level categorical prospect-level covariate
   - Heterogeneous treatment effects driven by estimated_income
   - Outcomes: opening_balance (continuous) and on_book_month9 (binary)
 
@@ -411,7 +412,8 @@ def generate_epsilon_data() -> pd.DataFrame:
         <1800 numeric feature columns>
         state, region, occupation_category, risk_tier,
         channel_preference, life_stage_category  : pd.Categorical (with NaN)
-        remail, stipulation  : int  (0/1)
+        remail      : int  (0/1)
+        stipulation : pd.Categorical  (5 levels: none/basic/standard/enhanced/premium)
         treatment      : int  (0=Control, 1=$100, 2=$400, 3=$500, ...)
         treatment_name : str
         offer          : int  (dollar amount)
@@ -480,10 +482,14 @@ def generate_epsilon_data() -> pd.DataFrame:
 
     # ── remail & stipulation ────────────────────────────────────
     treated_mask = offer_arr > 0
-    stipulation  = np.zeros(n, dtype=int)
     remail       = np.zeros(n, dtype=int)
-    stipulation[treated_mask] = rng.binomial(1, 0.50, treated_mask.sum())
-    remail[treated_mask]      = rng.binomial(1, 0.50, treated_mask.sum())
+    remail[treated_mask] = rng.binomial(1, 0.50, treated_mask.sum())
+
+    # stipulation: 5-level categorical, assigned independently of arm
+    # (same offer can get different stipulation levels)
+    stip_levels   = config.STIPULATION_LEVELS          # ['none','basic',...]
+    stip_arr      = rng.choice(stip_levels, size=n)    # uniform, all prospects
+    stipulation   = pd.Categorical(stip_arr, categories=stip_levels, ordered=True)
 
     # ── Outcome generation ───────────────────────────────────────
     income   = named_feats['estimated_income']
@@ -521,8 +527,9 @@ def generate_epsilon_data() -> pd.DataFrame:
         arm_effect = base_lift + low_mod + mid_mod + high_mod
         cate += np.where(treatment_arr == arm_id, arm_effect, 0.0)
 
-    cate += remail      * cate * config.REMAIL_EFFECT_BOOST
-    cate += stipulation * cate * config.STIPULATION_EFFECT_BOOST
+    cate += remail * cate * config.REMAIL_EFFECT_BOOST
+    stip_boost = np.array([config.STIPULATION_EFFECT_BY_LEVEL[s] for s in stip_arr])
+    cate += stip_boost * cate
     opening_balance = (base_balance + cate + rng.normal(0, 300, n)).clip(0, None)
 
     credit_z  = (named_feats['credit_score_modeled'] - 650) / 80
@@ -558,7 +565,7 @@ def generate_epsilon_data() -> pd.DataFrame:
         + 0.08 * chk_z
         - 0.12 * income_x_top_arm
         + 0.05 * remail
-        + 0.03 * stipulation
+        + stip_boost * 0.30   # higher stipulation level → slight retention lift
         + rng.normal(0, 0.15, n)
     )
     retention_prob = 1 / (1 + np.exp(-log_odds))
@@ -570,7 +577,7 @@ def generate_epsilon_data() -> pd.DataFrame:
     # Inject NaN into selected numeric columns
     df = _inject_numeric_nan(df, rng)
 
-    # Add remail / stipulation (numeric predictors)
+    # Add remail (binary numeric) and stipulation (5-level categorical)
     df['remail']      = remail
     df['stipulation'] = stipulation
 
@@ -590,14 +597,13 @@ def generate_epsilon_data() -> pd.DataFrame:
     # Summary
     n_numeric = sum(1 for c in df.columns
                     if df[c].dtype.kind in ('f', 'i', 'u')
-                    and c not in ('treatment', 'offer', 'on_book_month9',
-                                  'remail', 'stipulation'))
+                    and c not in ('treatment', 'offer', 'on_book_month9', 'remail'))
     n_cat = sum(1 for c in df.columns
                 if hasattr(df[c], 'cat') or df[c].dtype == object)
 
     print(f"\n  Dataset shape: {df.shape[0]:,} rows x {df.shape[1]} columns")
-    print(f"  Numeric feature columns   : {config.N_FEATURES} (+ 2 binary: remail, stipulation)")
-    print(f"  Categorical feature columns: {len(cat_feats)}")
+    print(f"  Numeric feature columns   : {config.N_FEATURES} (+ 1 binary: remail)")
+    print(f"  Categorical feature columns: {len(cat_feats) + 1} (incl. stipulation)")
 
     print("\n  Categorical feature summary:")
     for col in cat_feats:

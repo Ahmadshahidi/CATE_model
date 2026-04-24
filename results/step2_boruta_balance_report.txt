@@ -2,23 +2,31 @@
 STEP 2: LESHY (arfs) FEATURE SELECTION REPORT
 ======================================================================
 
-n_trials (max_iter) : 100
+n_trials (max_iter) : 50
 percentile (perc)   : 100
 top_n (floor)       : None
-force_include       : ['risk_tier', 'region', 'occupation_category', 'channel_preference', 'life_stage_category']
+force_include       : ['risk_tier', 'region', 'occupation_category', 'channel_preference', 'life_stage_category', 'stipulation']
 
-  Confirmed      : 2
+  Confirmed      : 10
   Tentative      : 0  (included in output)
-  Rejected       : 1434
+  Rejected       : 1425
   Added for Top-N: 0  (rescued rejected, hit top_n=None)
-  Force-included : 5
-  Total output   : 7
+  Force-included : 6
+  Total output   : 16
 
 ----------------------------------------------------------------------
 CONFIRMED FEATURES:
 ----------------------------------------------------------------------
-  investment_propensity_score                         hit_rate=1.000
-  stipulation                                         hit_rate=1.000
+  beh_0106                                            hit_rate=1.000
+  beh_0279                                            hit_rate=1.000
+  fin_0128                                            hit_rate=1.000
+  fin_0206                                            hit_rate=1.000
+  noise_0047                                          hit_rate=1.000
+  noise_0223                                          hit_rate=1.000
+  psy_0086                                            hit_rate=1.000
+  psy_0182                                            hit_rate=1.000
+  remail                                              hit_rate=1.000
+  total_debt_estimated                                hit_rate=1.000
 
 ----------------------------------------------------------------------
 TENTATIVE FEATURES  (included in output by default):
@@ -32,6 +40,7 @@ FORCE-INCLUDED FEATURES  (always kept regardless of verdict):
   occupation_category                                 hit_rate=0.000  [rejected]
   channel_preference                                  hit_rate=0.000  [rejected]
   life_stage_category                                 hit_rate=0.000  [rejected]
+  stipulation                                         hit_rate=0.000  [rejected]
 
 ----------------------------------------------------------------------
 REJECTED FEATURES:
@@ -124,7 +133,6 @@ REJECTED FEATURES:
   beh_0103                                            hit_rate=0.000
   beh_0104                                            hit_rate=0.000
   beh_0105                                            hit_rate=0.000
-  beh_0106                                            hit_rate=0.000
   beh_0107                                            hit_rate=0.000
   beh_0108                                            hit_rate=0.000
   beh_0111                                            hit_rate=0.000
@@ -257,7 +265,6 @@ REJECTED FEATURES:
   beh_0273                                            hit_rate=0.000
   beh_0274                                            hit_rate=0.000
   beh_0277                                            hit_rate=0.000
-  beh_0279                                            hit_rate=0.000
   beh_0280                                            hit_rate=0.000
   beh_0281                                            hit_rate=0.000
   beh_0282                                            hit_rate=0.000
@@ -615,7 +622,6 @@ REJECTED FEATURES:
   fin_0125                                            hit_rate=0.000
   fin_0126                                            hit_rate=0.000
   fin_0127                                            hit_rate=0.000
-  fin_0128                                            hit_rate=0.000
   fin_0129                                            hit_rate=0.000
   fin_0130                                            hit_rate=0.000
   fin_0131                                            hit_rate=0.000
@@ -672,7 +678,6 @@ REJECTED FEATURES:
   fin_0201                                            hit_rate=0.000
   fin_0202                                            hit_rate=0.000
   fin_0203                                            hit_rate=0.000
-  fin_0206                                            hit_rate=0.000
   fin_0207                                            hit_rate=0.000
   fin_0208                                            hit_rate=0.000
   fin_0209                                            hit_rate=0.000
@@ -898,6 +903,7 @@ REJECTED FEATURES:
   homeowner_flag                                      hit_rate=0.000
   household_size                                      hit_rate=0.000
   investment_account_indicator                        hit_rate=0.000
+  investment_propensity_score                         hit_rate=0.000
   life_stage_category                                 hit_rate=0.000
   life_stage_score                                    hit_rate=0.000
   liquid_asset_indicator                              hit_rate=0.000
@@ -943,7 +949,6 @@ REJECTED FEATURES:
   noise_0042                                          hit_rate=0.000
   noise_0045                                          hit_rate=0.000
   noise_0046                                          hit_rate=0.000
-  noise_0047                                          hit_rate=0.000
   noise_0048                                          hit_rate=0.000
   noise_0050                                          hit_rate=0.000
   noise_0052                                          hit_rate=0.000
@@ -1084,7 +1089,6 @@ REJECTED FEATURES:
   noise_0220                                          hit_rate=0.000
   noise_0221                                          hit_rate=0.000
   noise_0222                                          hit_rate=0.000
-  noise_0223                                          hit_rate=0.000
   noise_0224                                          hit_rate=0.000
   noise_0225                                          hit_rate=0.000
   noise_0226                                          hit_rate=0.000
@@ -1134,7 +1138,6 @@ REJECTED FEATURES:
   noise_0285                                          hit_rate=0.000
   noise_0286                                          hit_rate=0.000
   noise_0287                                          hit_rate=0.000
-  noise_0288                                          hit_rate=0.000
   noise_0289                                          hit_rate=0.000
   noise_0290                                          hit_rate=0.000
   noise_0291                                          hit_rate=0.000
@@ -1217,7 +1220,6 @@ REJECTED FEATURES:
   psy_0082                                            hit_rate=0.000
   psy_0083                                            hit_rate=0.000
   psy_0084                                            hit_rate=0.000
-  psy_0086                                            hit_rate=0.000
   psy_0087                                            hit_rate=0.000
   psy_0088                                            hit_rate=0.000
   psy_0089                                            hit_rate=0.000
@@ -1289,7 +1291,6 @@ REJECTED FEATURES:
   psy_0179                                            hit_rate=0.000
   psy_0180                                            hit_rate=0.000
   psy_0181                                            hit_rate=0.000
-  psy_0182                                            hit_rate=0.000
   psy_0183                                            hit_rate=0.000
   psy_0185                                            hit_rate=0.000
   psy_0186                                            hit_rate=0.000
@@ -1461,13 +1462,12 @@ REJECTED FEATURES:
   psy_0391                                            hit_rate=0.000
   psy_0394                                            hit_rate=0.000
   region                                              hit_rate=0.000
-  remail                                              hit_rate=0.000
   retirement_account_indicator                        hit_rate=0.000
   revolving_utilization                               hit_rate=0.000
   risk_tier                                           hit_rate=0.000
   savings_account_indicator                           hit_rate=0.000
   state                                               hit_rate=0.000
-  total_debt_estimated                                hit_rate=0.000
+  stipulation                                         hit_rate=0.000
   years_at_current_address                            hit_rate=0.000
   zip_home_value_index                                hit_rate=0.000
 ======================================================================

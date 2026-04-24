@@ -2,6 +2,7 @@
 Main Pipeline — Offer-Only Uplift Modeling with Scenario Analysis
 Treatment arms: Control, $100, $400, $500
 remail and stipulation are PREDICTORS (not treatment arms).
+stipulation is a 5-level categorical; its cost is zero and it is not toggled in scenarios.
 
 Workflow:
   0. Data generation / loading
@@ -11,7 +12,7 @@ Workflow:
   3. Model 1: X-Learner (3 offer arms vs. control)
   4. Model 2: Attrition / retention prediction
   5. Model 3: Net value optimization — baseline run
-  6. Scenario analysis: run each (remail × stipulation) scenario,
+  6. Scenario analysis: run each remail scenario,
      predict counterfactual CATEs, and compare portfolio net values
 """
 
@@ -38,6 +39,7 @@ def main():
     print("\n" + "="*70)
     print(" "*10 + "INCREMENTAL CAMPAIGN UPLIFT MODELING")
     print(" "*5 + "Offer-Only Treatment  |  remail & stipulation as predictors")
+    print(" "*5 + "(stipulation: 5-level categorical, zero cost, not toggled in scenarios)")
     print(" "*10 + f"({len(config.TREATMENT_COMPONENTS)} arms: "
           f"{len(config.TREATMENT_COMPONENTS)-1} offer arms + control)")
     print("="*70 + "\n")
@@ -92,6 +94,7 @@ def main():
     # Split columns:
     #   features  = all columns EXCEPT outcomes and 'offer'
     #               → remail and stipulation ARE included as features
+    #                 (stipulation as 5-level categorical, zero cost)
     #   outcomes  = opening_balance, on_book_month9, treatment, treatment_name
     #   'offer'   = excluded (it is directly encoded by the treatment arm ID)
     # ------------------------------------------------------------------
@@ -105,8 +108,8 @@ def main():
     y_attrition = df['on_book_month9']
     treatment   = df['treatment']
     offers_col  = df['offer']
-    stip_col    = df['stipulation']
     remail_col  = df['remail']
+    stip_col    = df['stipulation']
 
     print(f"\nData Summary:")
     print(f"  Total samples  : {X.shape[0]:,}")
@@ -125,12 +128,14 @@ def main():
         print(f"    Arm {arm_id}: {config.TREATMENTS[arm_id]:<12}  "
               f"offer=${offer:<5}  {cnt:>5,} ({pct:>5.1f}%)")
 
-    print(f"\n  Remail / Stipulation (treated prospects):")
     treated_mask = offers_col > 0
-    print(f"    Remail=1      : {remail_col[treated_mask].sum():,}  "
+    print(f"\n  Remail (treated prospects):")
+    print(f"    Remail=1 : {remail_col[treated_mask].sum():,}  "
           f"({100*remail_col[treated_mask].mean():.1f}%)")
-    print(f"    Stipulation=1 : {stip_col[treated_mask].sum():,}  "
-          f"({100*stip_col[treated_mask].mean():.1f}%)")
+    print(f"\n  Stipulation distribution (all prospects):")
+    stip_counts = stip_col.value_counts().reindex(config.STIPULATION_LEVELS, fill_value=0)
+    for lvl, cnt in stip_counts.items():
+        print(f"    {lvl:<12}: {cnt:,}  ({100*cnt/len(stip_col):.1f}%)")
 
     _step_done("DATA PREPARATION", t_step)
 
@@ -169,7 +174,7 @@ def main():
           f"{X_step1.shape[1]}  →  {X_balance.shape[1]} features")
 
     for col in ['remail', 'stipulation']:
-        print(f"  {col:>12} in balance features: {col in X_balance.columns}")
+        print(f"  {col:>12} in balance features : {col in X_balance.columns}")
 
     _step_done("BORUTA-SHAP FEATURE SELECTION (balance)", t_step)
 
@@ -193,7 +198,7 @@ def main():
           f"{X_step1.shape[1]}  →  {X_attrition.shape[1]} features")
 
     for col in ['remail', 'stipulation']:
-        print(f"  {col:>12} in attrition features: {col in X_attrition.columns}")
+        print(f"  {col:>12} in attrition features : {col in X_attrition.columns}")
 
     _step_done("BORUTA-SHAP FEATURE SELECTION (attrition)", t_step)
 
@@ -407,8 +412,8 @@ def main():
         'treatment':                 treatment.values,
         'treatment_name':            df['treatment_name'].values,
         'offer':                     offers_col.values,
-        'stipulation':               stip_col.values,
         'remail':                    remail_col.values,
+        'stipulation':               stip_col.values,
         'opening_balance_actual':    y_balance.values,
         'retention_actual':          y_attrition.values,
         'retention_predicted_proba': retention_proba,
@@ -434,9 +439,9 @@ def main():
     ).round(3)
     print(summary.to_string())
 
-    # Campaign summary by stipulation × remail (treated prospects)
+    # Campaign summary by stipulation level × remail (treated prospects)
     print("\n" + "="*70)
-    print("CAMPAIGN SUMMARY  (by stipulation × remail — treated only)")
+    print("CAMPAIGN SUMMARY  (by stipulation level × remail — treated only)")
     print("="*70)
     summary2 = insights[insights['offer'] > 0].groupby(['stipulation', 'remail']).agg(
         n_prospects          = ('opening_balance_actual', 'count'),
@@ -495,27 +500,22 @@ def main():
     print("  ✓ cumulative_gain.png updated")
 
     # ================================================================
-    # STEP 4: SCENARIO ANALYSIS
+    # STEP 4: PER-PROSPECT REMAIL OPTIMIZATION
     # ================================================================
-    t_step = _step_header("STEP 4 — SCENARIO ANALYSIS  (remail × stipulation toggles)", 6, start_time)
-    print("\nFor each scenario, counterfactual CATEs are predicted by overriding")
-    print("the remail/stipulation columns in the feature matrix, then the")
-    print("net-value optimizer picks the best offer with scenario-adjusted costs.\n")
+    t_step = _step_header("STEP 4 — PER-PROSPECT REMAIL OPTIMIZATION", 6, start_time)
+    print("\nCATEs are predicted under both remail=0 and remail=1.  For each")
+    print("prospect the (offer arm, remail flag) combination that maximises")
+    print("individual net value is selected.  This strictly dominates any")
+    print("global remail policy.\n")
 
-    scen_summary, scenario_dfs = optimizer.run_all_scenarios(
-        X_features    = X_step2,
-        insights_df   = insights,
+    remail_opt_df = optimizer.run_remail_optimization(
+        X_features     = X_step2,
+        insights_df    = insights,
         xlearner_model = xlearner_model,
-        save_dir      = config.RESULTS_DIR,
+        save_dir       = config.RESULTS_DIR,
     )
-
-    # Save per-scenario detailed results
-    for scen_name, df_opt in scenario_dfs.items():
-        scen_path = os.path.join(
-            config.RESULTS_DIR, f'scenario_{scen_name}_results.csv')
-        df_opt.to_csv(scen_path, index=False)
-    print(f"\n  Per-scenario result CSVs saved to: {config.RESULTS_DIR}")
-    _step_done("SCENARIO ANALYSIS", t_step)
+    remail_opt_path = os.path.join(config.RESULTS_DIR, 'remail_optimization_results.csv')
+    _step_done("PER-PROSPECT REMAIL OPTIMIZATION", t_step)
 
     # ================================================================
     # FINAL SUMMARY
@@ -548,12 +548,11 @@ def main():
           f"{os.path.join(config.RESULTS_DIR, 'auuc_metrics.csv')}")
     print(f"    Net value strategy results : "
           f"{os.path.join(config.RESULTS_DIR, 'net_value_strategy_results.csv')}")
-    print(f"    Scenario comparison        : "
-          f"{os.path.join(config.RESULTS_DIR, 'scenario_comparison.csv')}")
-    print(f"    Scenario bar chart         : "
-          f"{os.path.join(config.RESULTS_DIR, 'scenario_comparison_bar.png')}")
-    print(f"    Scenario offer dist chart  : "
-          f"{os.path.join(config.RESULTS_DIR, 'scenario_offer_distributions.png')}")
+    print(f"    Remail opt. results        : {remail_opt_path}")
+    print(f"    Remail comparison chart    : "
+          f"{os.path.join(config.RESULTS_DIR, 'remail_optimization_comparison.png')}")
+    print(f"    Remail offer dist. chart   : "
+          f"{os.path.join(config.RESULTS_DIR, 'remail_offer_distribution.png')}")
     print(f"    Decile strategy comparison : "
           f"{os.path.join(config.RESULTS_DIR, 'decile_strategy_comparison.csv')}")
     print(f"    Decile breakdown           : "
@@ -580,17 +579,17 @@ def main():
         print(f"    Lift / $ spent : ${row['lift_per_dollar_spent']:.4f}")
     print(f"{'='*70}\n")
 
-    # Print winning scenario
-    best_row = scen_summary.iloc[0]
+    # Remail optimization summary
+    n_remail = int((remail_opt_df['optimal_remail_flag'] == 1).sum())
+    pct_r    = 100 * n_remail / len(remail_opt_df)
+    total_nv = remail_opt_df['optimal_net_value'].sum()
     print(f"\n{'='*70}")
-    print("BEST SCENARIO  (highest total portfolio net value)")
+    print("PER-PROSPECT REMAIL OPTIMIZATION SUMMARY")
     print(f"{'='*70}")
-    print(f"  Scenario      : {best_row['scenario']}")
-    print(f"  remail        : {int(best_row['remail'])}")
-    print(f"  stipulation   : {int(best_row['stipulation'])}")
-    print(f"  Total NV      : ${best_row['total_net_value']:,.2f}")
-    print(f"  Lift vs ctrl  : ${best_row['lift_vs_control']:,.2f}")
-    print(f"  Extra cost/pp : ${best_row['extra_cost_per_prospect']:.2f}")
+    print(f"  Remail assigned     : {n_remail:,}  ({pct_r:.1f}% of prospects)")
+    print(f"  Total portfolio NV  : ${total_nv:,.2f}")
+    print(f"  Avg NV / prospect   : ${remail_opt_df['optimal_net_value'].mean():,.2f}")
+    print(f"  Lift vs no offer    : ${remail_opt_df['net_value_gain_vs_ctrl'].sum():,.2f}")
     print(f"{'='*70}\n")
 
     # ================================================================
@@ -623,10 +622,7 @@ def main():
         print(f"    Base arm cost                : ${base_cost:.2f}")
         print(f"    → Add remail  (+${config.REMAIL_COST:.2f}): "
               f"total ${base_cost + config.REMAIL_COST:.2f}")
-        print(f"    → Add stip    (+${config.STIPULATION_COST:.2f}): "
-              f"total ${base_cost + config.STIPULATION_COST:.2f}")
-        print(f"    → Add both    (+${config.REMAIL_COST + config.STIPULATION_COST:.2f}): "
-              f"total ${base_cost + config.REMAIL_COST + config.STIPULATION_COST:.2f}")
+        print(f"    (stipulation cost = $0)")
 
     print("\n" + "="*70 + "\n")
 
