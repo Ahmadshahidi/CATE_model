@@ -235,6 +235,8 @@ class XLearnerUplift:
 
             # Quick diagnostic
             cate_all = self._predict_cate_for_arm(arm_id, X_arr)
+            if config.LOG_TRANSFORM_TARGET:
+                cate_all = np.expm1(cate_all)
             arm_elapsed = time.time() - t_arm_start
             print(f"    CATE diagnostics: mean={cate_all.mean():+.2f}  "
                   f"median={np.median(cate_all):+.2f}  "

@@ -147,24 +147,37 @@ STIPULATION_EFFECT_BY_LEVEL = {
 # Selects how (if at all) selection bias is corrected before
 # training the X-Learner.
 #
-#   'psm'  → Propensity Score Matching (nearest-neighbour 1:1).
-#             PSM diagnostic plots are always saved.
-#             Set USE_MATCHED_DATA_FOR_XLEARNER = True to train
-#             the X-Learner on the matched sub-sample instead of
-#             the full dataset.
+#   'psm'     → Propensity Score Matching (nearest-neighbour 1:1).
+#               PSM diagnostic plots are always saved.
+#               Set USE_MATCHED_DATA_FOR_XLEARNER = True to train
+#               the X-Learner on the matched sub-sample instead of
+#               the full dataset.
+#               Limitation: some arms may have zero matches when
+#               propensity overlap is poor (small/rare arms).
 #
-#   'iptw' → Inverse Probability of Treatment Weighting.
-#             All rows are kept; each row is re-weighted by
-#             w = P(T=t) / P(T=t | X)  (stabilised, recommended).
-#             Weights are passed as sample_weight to the X-Learner.
-#             Diagnostic plots analogous to the PSM Love plots are
-#             saved (weighted SMD, weight distributions, ESS).
+#   'iptw'    → Inverse Probability of Treatment Weighting.
+#               All rows are kept; each row is re-weighted by
+#               w = P(T=t) / P(T=t | X)  (stabilised, recommended).
+#               Weights are passed as sample_weight to the X-Learner.
+#               Limitation: weights can blow up with highly skewed
+#               arm sizes or extreme propensity scores.
 #
-#   'none' → No bias correction.  X-Learner trains on the full
-#             unweighted dataset.
+#   'overlap' → Overlap Weighting (Li, Morgan & Zaslavsky 2018).
+#               All rows are kept; each row is re-weighted by
+#               w = h(x) / e_k(x)  where h(x) is the harmonic mean
+#               of propensity scores across all arms.
+#               Weights are bounded in (0, 1] — variance is always
+#               finite, no arm gets zero weight, and no aggressive
+#               trimming is needed.  Recommended for production data
+#               with heavily skewed arm sizes.
+#               Note: estimates ATE on the overlap population (units
+#               where treatment assignment was genuinely ambiguous).
+#
+#   'none'    → No bias correction.  X-Learner trains on the full
+#               unweighted dataset.
 # ===========================================================
 
-BIAS_CORRECTION_METHOD = 'psm'   # 'psm' | 'iptw' | 'none'
+BIAS_CORRECTION_METHOD = 'psm'   # 'psm' | 'iptw' | 'overlap' | 'none'
 
 # ===========================================================
 # PROPENSITY SCORE MATCHING (PSM)
@@ -224,6 +237,24 @@ IPTW_PS_METHOD        = 'catboost'  # 'catboost' | 'logistic' | 'xgboost'
 IPTW_STABILIZED       = True         # stabilised weights (recommended)
 IPTW_TRIM_PERCENTILE  = 1.0          # trim extreme weights at each tail (%)
 IPTW_RANDOM_STATE     = RANDOM_SEED
+
+# ===========================================================
+# OVERLAP WEIGHTING
+# ===========================================================
+# Used when BIAS_CORRECTION_METHOD = 'overlap'.
+#
+# OVERLAP_PS_METHOD : propensity score estimator (same options as IPTW).
+#   'catboost'  → recommended (handles missing/mixed data natively)
+#   'logistic'  → fast fallback
+#   'xgboost'   → flexible; requires xgboost package
+#
+# OVERLAP_TRIM_PERCENTILE : optional per-arm trimming.  Because overlap
+#   weights are naturally bounded in (0, 1], extreme values are rare.
+#   Set to 0 to disable (recommended default for overlap weighting).
+# ===========================================================
+
+OVERLAP_PS_METHOD       = 'catboost'  # 'catboost' | 'logistic' | 'xgboost'
+OVERLAP_TRIM_PERCENTILE = 0.0         # 0 = no trimming (weights already bounded)
 
 # Covariates highlighted in balance plots (must survive feature selection)
 PSM_KEY_COVARIATES = [

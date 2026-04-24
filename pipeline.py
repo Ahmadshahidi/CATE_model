@@ -331,6 +331,31 @@ def main():
         print(f"    • iptw_effective_sample_sizes.csv — ESS per arm")
 
     # ------------------------------------------------------------------
+    elif bias_method == 'overlap':
+        print("\n  Overlap weighting re-weights every observation by")
+        print("  w = h(x) / e_k(x)  where h(x) is the harmonic mean of")
+        print("  propensity scores across arms.  Weights are bounded in")
+        print("  (0, 1] — robust to skewed arm sizes and extreme PS values.")
+        print(f"\n  Settings:")
+        print(f"    PS estimator     : {config.OVERLAP_PS_METHOD}")
+        print(f"    Trim percentile  : {config.OVERLAP_TRIM_PERCENTILE}%  (each tail)\n")
+
+        from src.models.iptw import run_overlap
+        overlap_result = run_overlap(
+            X                = X_step2,
+            treatment        = treatment,
+            save_results_dir = config.RESULTS_DIR,
+        )
+        sample_weight_xl = overlap_result.weights
+
+        print(f"\n  Overlap weighting output files saved to: {config.RESULTS_DIR}")
+        print(f"    • overlap_weight_distribution.png  — weight histograms per arm")
+        for arm_id in sorted(k for k in config.TREATMENT_COMPONENTS if k != 0):
+            print(f"    • overlap_love_plot_arm{arm_id}.png    — weighted Love plot")
+        print(f"    • overlap_balance_summary.csv      — weighted SMD table")
+        print(f"    • overlap_effective_sample_sizes.csv — ESS per arm")
+
+    # ------------------------------------------------------------------
     elif bias_method == 'none':
         print("\n  ℹ  BIAS_CORRECTION_METHOD = 'none'")
         print("     No bias correction applied.")
@@ -340,7 +365,7 @@ def main():
     else:
         raise ValueError(
             f"Unknown BIAS_CORRECTION_METHOD='{bias_method}'. "
-            f"Valid values: 'psm', 'iptw', 'none'."
+            f"Valid values: 'psm', 'iptw', 'overlap', 'none'."
         )
 
     _step_done(f"BIAS CORRECTION [{bias_method.upper()}]", t_step)

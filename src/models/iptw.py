@@ -95,13 +95,29 @@ def _encode_cats(df: pd.DataFrame) -> pd.DataFrame:
 
 class IPTWWeighting:
     """
-    Inverse Probability of Treatment Weighting for multi-arm studies.
+    Propensity-score weighting for multi-arm studies.
+
+    Supports two weighting schemes via `weighting_type`:
+
+    'iptw'    — Inverse Probability of Treatment Weighting.
+                w_i = P(T=k) / P(T=k | X)  (stabilised, recommended)
+                     or  1 / P(T=k | X)    (unstabilised).
+                Variance can blow up when propensity scores are near 0/1
+                (common with heavily skewed arm sizes).
+
+    'overlap' — Overlap Weighting (Li, Morgan & Zaslavsky 2018).
+                w_i = h(x_i) / e_k(x_i)
+                where h(x) = 1 / Σ_k(1/e_k(x))  (harmonic mean of PS).
+                Weights are bounded in (0, 1], so variance is always
+                finite — no trimming required for skewed data.
+                Estimates the ATE on the overlap population (units
+                where treatment assignment was genuinely ambiguous).
 
     Attributes
     ----------
     weights : np.ndarray, shape (n_samples,)
-        Final (trimmed) IPTW weight for every observation in the
-        dataset, in the original row order.
+        Final (trimmed) weight for every observation in the dataset,
+        in the original row order.
     propensity_scores : np.ndarray, shape (n_samples, n_arms_total)
         Estimated P(T=k | X) for every unit and every arm (columns
         ordered by sorted arm_id).
@@ -114,13 +130,23 @@ class IPTWWeighting:
     """
 
     def __init__(self,
+                 weighting_type: str = 'iptw',
                  ps_method: str    = None,
                  stabilized: bool  = None,
                  trim_pct: float   = None,
                  random_state: int = None):
-        self.ps_method    = ps_method    if ps_method    is not None else config.IPTW_PS_METHOD
-        self.stabilized   = stabilized   if stabilized   is not None else config.IPTW_STABILIZED
-        self.trim_pct     = trim_pct     if trim_pct     is not None else config.IPTW_TRIM_PERCENTILE
+        if weighting_type not in ('iptw', 'overlap'):
+            raise ValueError(f"weighting_type must be 'iptw' or 'overlap', got '{weighting_type}'")
+        self.weighting_type = weighting_type
+
+        if weighting_type == 'overlap':
+            self.ps_method    = ps_method    if ps_method    is not None else config.OVERLAP_PS_METHOD
+            self.trim_pct     = trim_pct     if trim_pct     is not None else config.OVERLAP_TRIM_PERCENTILE
+            self.stabilized   = False        # not applicable for overlap
+        else:
+            self.ps_method    = ps_method    if ps_method    is not None else config.IPTW_PS_METHOD
+            self.stabilized   = stabilized   if stabilized   is not None else config.IPTW_STABILIZED
+            self.trim_pct     = trim_pct     if trim_pct     is not None else config.IPTW_TRIM_PERCENTILE
         self.random_state = random_state if random_state is not None else config.IPTW_RANDOM_STATE
 
         self.weights           = None
@@ -137,8 +163,7 @@ class IPTWWeighting:
     def fit_transform(self, X: pd.DataFrame, treatment,
                       save_dir: str = None) -> 'IPTWWeighting':
         """
-        Estimate propensity scores, compute IPTW weights, and save
-        diagnostics.
+        Estimate propensity scores, compute weights, and save diagnostics.
 
         Parameters
         ----------
@@ -150,12 +175,16 @@ class IPTWWeighting:
         -------
         self
         """
+        method_label = ('OVERLAP WEIGHTING' if self.weighting_type == 'overlap'
+                        else 'INVERSE PROBABILITY OF TREATMENT WEIGHTING (IPTW)')
         print("\n" + "="*60)
-        print("INVERSE PROBABILITY OF TREATMENT WEIGHTING (IPTW)")
+        print(method_label)
         print("="*60)
-        print(f"\n  PS estimator : {self.ps_method}")
-        print(f"  Stabilised   : {self.stabilized}")
-        print(f"  Trim %ile    : {self.trim_pct:.1f}%  (each tail)")
+        print(f"\n  Weighting type : {self.weighting_type.upper()}")
+        print(f"  PS estimator   : {self.ps_method}")
+        if self.weighting_type == 'iptw':
+            print(f"  Stabilised     : {self.stabilized}")
+        print(f"  Trim %ile      : {self.trim_pct:.1f}%  (each tail)")
 
         t_arr = np.array(treatment, dtype=int)
         self.arm_ids = sorted(config.TREATMENT_COMPONENTS.keys())   # [0,1,2,3]
@@ -169,31 +198,50 @@ class IPTWWeighting:
         self.propensity_scores = self._estimate_ps(X, t_arr)
 
         # ── Step 2: compute raw weights ───────────────────────────────
-        # Marginal treatment probabilities (from sample frequencies)
-        marginal_probs = {
-            arm: (t_arr == arm).mean() for arm in self.arm_ids
-        }
-
         weights_raw = np.zeros(n, dtype=float)
-        for i, arm_id in enumerate(self.arm_ids):
-            mask = t_arr == arm_id
-            ps_col = self.propensity_scores[:, i]    # P(T=arm_id | X)
-            ps_col_clipped = np.clip(ps_col, 1e-6, 1 - 1e-6)
-            if self.stabilized:
-                weights_raw[mask] = marginal_probs[arm_id] / ps_col_clipped[mask]
-            else:
-                weights_raw[mask] = 1.0 / ps_col_clipped[mask]
 
-        # ── Step 3: trim extreme weights ──────────────────────────────
-        if self.trim_pct > 0:
-            lo = np.percentile(weights_raw, self.trim_pct)
-            hi = np.percentile(weights_raw, 100.0 - self.trim_pct)
-            weights_trimmed = np.clip(weights_raw, lo, hi)
-            n_trimmed = ((weights_raw < lo) | (weights_raw > hi)).sum()
-            print(f"\n  Weight trimming: clipped {n_trimmed:,} observations "
-                  f"to [{lo:.4f}, {hi:.4f}]")
+        if self.weighting_type == 'overlap':
+            # Overlap weights (Li, Morgan & Zaslavsky 2018):
+            #   h(x) = 1 / Σ_k(1/e_k(x))   ← harmonic mean of PS across arms
+            #   w_i  = h(x_i) / e_k(x_i)   ← for unit i assigned to arm k
+            # Weights are in (0, 1] so variance is always finite — no need
+            # for aggressive trimming even with severely skewed arm sizes.
+            ps_clipped = np.clip(self.propensity_scores, 1e-6, 1 - 1e-6)
+            harmonic_mean = 1.0 / np.sum(1.0 / ps_clipped, axis=1)   # shape (n,)
+            for i, arm_id in enumerate(self.arm_ids):
+                mask = t_arr == arm_id
+                weights_raw[mask] = harmonic_mean[mask] / ps_clipped[mask, i]
         else:
-            weights_trimmed = weights_raw.copy()
+            # IPTW weights:  P(T=k) / P(T=k|X)  (stabilised)  or  1/P(T=k|X)
+            marginal_probs = {arm: (t_arr == arm).mean() for arm in self.arm_ids}
+            for i, arm_id in enumerate(self.arm_ids):
+                mask = t_arr == arm_id
+                ps_col = self.propensity_scores[:, i]    # P(T=arm_id | X)
+                ps_col_clipped = np.clip(ps_col, 1e-6, 1 - 1e-6)
+                if self.stabilized:
+                    weights_raw[mask] = marginal_probs[arm_id] / ps_col_clipped[mask]
+                else:
+                    weights_raw[mask] = 1.0 / ps_col_clipped[mask]
+
+        # ── Step 3: trim extreme weights per arm ─────────────────────
+        # Trimming is done within each arm separately so that rare arms
+        # (which produce large weights) are not over-trimmed by the
+        # global percentiles driven by dominant arms.
+        weights_trimmed = weights_raw.copy()
+        if self.trim_pct > 0:
+            n_trimmed_total = 0
+            for arm_id in self.arm_ids:
+                arm_mask = t_arr == arm_id
+                arm_w    = weights_raw[arm_mask]
+                lo = np.percentile(arm_w, self.trim_pct)
+                hi = np.percentile(arm_w, 100.0 - self.trim_pct)
+                clipped  = np.clip(arm_w, lo, hi)
+                n_arm_trimmed = ((arm_w < lo) | (arm_w > hi)).sum()
+                weights_trimmed[arm_mask] = clipped
+                n_trimmed_total += n_arm_trimmed
+                print(f"  Arm {arm_id} weight trim: "
+                      f"[{lo:.4f}, {hi:.4f}]  clipped={n_arm_trimmed:,}")
+            print(f"\n  Total observations trimmed: {n_trimmed_total:,}")
 
         self.weights = weights_trimmed
 
@@ -210,7 +258,8 @@ class IPTWWeighting:
             for arm_id in sorted(k for k in self.arm_ids if k != 0):
                 self._plot_love(balance_rows, arm_id, save_dir)
 
-            bal_path = os.path.join(save_dir, 'iptw_balance_summary.csv')
+            prefix = 'overlap' if self.weighting_type == 'overlap' else 'iptw'
+            bal_path = os.path.join(save_dir, f'{prefix}_balance_summary.csv')
             self.balance_summary.to_csv(bal_path, index=False)
             print(f"\n  Balance summary saved to: {bal_path}")
 
@@ -221,12 +270,13 @@ class IPTWWeighting:
                  'ess': round(self.ess.get(arm_id, 0), 2)}
                 for arm_id in self.arm_ids
             ])
-            ess_path = os.path.join(save_dir, 'iptw_effective_sample_sizes.csv')
+            ess_path = os.path.join(save_dir, f'{prefix}_effective_sample_sizes.csv')
             ess_df.to_csv(ess_path, index=False)
             print(f"  Effective sample sizes saved to: {ess_path}")
 
+        done_label = 'OVERLAP WEIGHTING COMPLETE' if self.weighting_type == 'overlap' else 'IPTW COMPLETE'
         print(f"\n{'='*60}")
-        print("IPTW COMPLETE")
+        print(done_label)
         for arm_id in self.arm_ids:
             n_arm = (t_arr == arm_id).sum()
             ess_arm = self.ess.get(arm_id, np.nan)
@@ -453,17 +503,15 @@ class IPTWWeighting:
                 smd_uw   = abs(mu_t_uw - mu_c_uw) / sd_pool if sd_pool > 0 else 0.0
 
                 # Weighted SMD (IPTW-adjusted)
+                # Denominator uses the same unweighted sd_pool as above so
+                # smd_unweighted and smd_weighted share a common scale and
+                # are directly comparable on Love plots (Austin & Stuart 2015).
                 w_t = w_sub[t_idx]
                 w_c = w_sub[c_idx]
 
                 wmu_t = np.average(col[t_idx], weights=w_t) if w_t.sum() > 0 else mu_t_uw
                 wmu_c = np.average(col[c_idx], weights=w_c) if w_c.sum() > 0 else mu_c_uw
-                wvar_t = (np.average((col[t_idx] - wmu_t) ** 2, weights=w_t)
-                          if w_t.sum() > 0 else col[t_idx].var())
-                wvar_c = (np.average((col[c_idx] - wmu_c) ** 2, weights=w_c)
-                          if w_c.sum() > 0 else col[c_idx].var())
-                wsd_pool = np.sqrt((wvar_t + wvar_c) / 2.0)
-                smd_w    = abs(wmu_t - wmu_c) / wsd_pool if wsd_pool > 0 else 0.0
+                smd_w = abs(wmu_t - wmu_c) / sd_pool if sd_pool > 0 else 0.0
 
                 balanced = smd_w < 0.1
                 if balanced:
@@ -539,7 +587,8 @@ class IPTWWeighting:
         plt.suptitle('IPTW Weight Distributions (Before and After Trimming)',
                      fontsize=13, fontweight='bold')
         plt.tight_layout()
-        path = os.path.join(save_dir, 'iptw_weight_distribution.png')
+        prefix = 'overlap' if self.weighting_type == 'overlap' else 'iptw'
+        path = os.path.join(save_dir, f'{prefix}_weight_distribution.png')
         plt.savefig(path, dpi=150, bbox_inches='tight')
         plt.close()
         print(f"  Weight distribution plot saved: {path}")
@@ -561,13 +610,15 @@ class IPTWWeighting:
         df = (df[df['feature'].isin(key_covs)]
                 .sort_values('smd_unweighted', ascending=True))
 
+        weighted_label = ('Overlap-weighted' if self.weighting_type == 'overlap'
+                          else 'IPTW-weighted')
         fig, ax = plt.subplots(figsize=(9, max(5, len(df) * 0.45)))
         y_pos = np.arange(len(df))
 
         ax.barh(y_pos - 0.2, df['smd_unweighted'], 0.38,
                 color='#E74C3C', alpha=0.75, label='Unweighted')
         ax.barh(y_pos + 0.2, df['smd_weighted'],   0.38,
-                color='#2E86AB', alpha=0.75, label='IPTW-weighted')
+                color='#2E86AB', alpha=0.75, label=weighted_label)
 
         ax.axvline(x=0.1, color='grey', linestyle='--', linewidth=1.2,
                    label='|SMD| = 0.10 threshold')
@@ -575,16 +626,20 @@ class IPTWWeighting:
         ax.set_yticklabels(df['feature'], fontsize=9)
         ax.set_xlabel('Absolute Standardised Mean Difference (SMD)', fontsize=10)
         arm_label = config.TREATMENTS[arm_id]
-        ax.set_title(f'IPTW Love Plot — Arm {arm_id} ({arm_label}) vs. Control\n'
-                     f'Stabilised={self.stabilized}  Trim={self.trim_pct}%',
+        prefix = 'overlap' if self.weighting_type == 'overlap' else 'iptw'
+        method_label = ('Overlap' if self.weighting_type == 'overlap' else 'IPTW')
+        subtitle = (f'Trim={self.trim_pct}%' if self.weighting_type == 'overlap'
+                    else f'Stabilised={self.stabilized}  Trim={self.trim_pct}%')
+        ax.set_title(f'{method_label} Love Plot — Arm {arm_id} ({arm_label}) vs. Control\n'
+                     f'{subtitle}',
                      fontsize=12, fontweight='bold')
         ax.legend(fontsize=9)
         ax.grid(True, alpha=0.3, axis='x')
         plt.tight_layout()
-        path = os.path.join(save_dir, f'iptw_love_plot_arm{arm_id}.png')
+        path = os.path.join(save_dir, f'{prefix}_love_plot_arm{arm_id}.png')
         plt.savefig(path, dpi=150, bbox_inches='tight')
         plt.close()
-        print(f"    IPTW Love plot saved: {path}")
+        print(f"    {method_label} Love plot saved: {path}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -611,9 +666,38 @@ def run_iptw(X: pd.DataFrame,
     if not isinstance(treatment, pd.Series):
         treatment = pd.Series(treatment)
 
-    iptw = IPTWWeighting()
+    iptw = IPTWWeighting(weighting_type='iptw')
     iptw.fit_transform(X, treatment, save_dir=save_results_dir)
     return iptw
+
+
+def run_overlap(X: pd.DataFrame,
+                treatment,
+                save_results_dir: str = None) -> IPTWWeighting:
+    """
+    Compute overlap weights for the given feature matrix and treatment vector.
+
+    Overlap weights  w_i = h(x_i) / e_k(x_i)  are bounded in (0, 1], so
+    variance is always finite even when propensity scores are near 0 or 1.
+    This makes them robust for skewed arm sizes where IPTW fails.
+
+    Parameters
+    ----------
+    X                : pd.DataFrame  Boruta-SHAP selected features.
+    treatment        : array-like    Multi-arm treatment vector (0 = control).
+    save_results_dir : str           Directory for diagnostic plots/CSVs.
+
+    Returns
+    -------
+    IPTWWeighting  (fitted, weighting_type='overlap')
+        Access the per-row weights via  result.weights  (np.ndarray).
+    """
+    if not isinstance(treatment, pd.Series):
+        treatment = pd.Series(treatment)
+
+    ow = IPTWWeighting(weighting_type='overlap')
+    ow.fit_transform(X, treatment, save_dir=save_results_dir)
+    return ow
 
 
 # ─────────────────────────────────────────────────────────────────────────────
