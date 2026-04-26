@@ -243,9 +243,14 @@ class IPTWWeighting:
                       f"[{lo:.4f}, {hi:.4f}]  clipped={n_arm_trimmed:,}")
             print(f"\n  Total observations trimmed: {n_trimmed_total:,}")
 
+        # ── Step 4: entropy balancing refinement (optional) ──────────
+        if getattr(config, 'BALANCE_REFINE', False):
+            weights_trimmed = self._entropy_balance_refine(
+                X, t_arr, weights_trimmed)
+
         self.weights = weights_trimmed
 
-        # ── Step 4: diagnostics ───────────────────────────────────────
+        # ── Step 5: diagnostics ───────────────────────────────────────
         self._print_weight_summary(t_arr, weights_trimmed)
         self._compute_ess(t_arr, weights_trimmed)
         balance_rows = self._compute_balance(X, t_arr, weights_trimmed)
@@ -286,6 +291,137 @@ class IPTWWeighting:
         print(f"{'='*60}\n")
 
         return self
+
+    # ------------------------------------------------------------------
+    # Entropy balancing refinement
+    # ------------------------------------------------------------------
+    def _entropy_balance_refine(self, X: pd.DataFrame,
+                                 t_arr: np.ndarray,
+                                 weights_init: np.ndarray) -> np.ndarray:
+        """
+        Post-process weights via entropy balancing for arms that remain
+        imbalanced after IPTW / overlap weighting.
+
+        For each treated arm, identifies features with weighted SMD above
+        BALANCE_REFINE_SMD_THRESHOLD and solves a constrained optimisation:
+
+          minimise   Σ w_i · log(w_i / w_init_i)        (KL from initial)
+          subject to X_t_imbal.T @ w_t = targets · Σw_init_t   (balance)
+                     Σ w_t = Σ w_init_t                         (sum preserved)
+                     w_i ≥ 1e-8                                  (non-negative)
+
+        On convergence the treated weights for that arm are replaced.
+        On failure a warning is printed and the original weights are kept.
+        """
+        from scipy.optimize import minimize as sp_minimize
+
+        threshold  = getattr(config, 'BALANCE_REFINE_SMD_THRESHOLD', 0.10)
+        weights    = weights_init.copy()
+        ctrl_mask  = t_arr == 0
+        feat_cols  = X.columns.tolist()
+
+        print(f"\n  Entropy balancing refinement  (threshold |SMD| > {threshold})")
+
+        for arm_id in sorted(k for k in self.arm_ids if k != 0):
+            arm_mask = t_arr == arm_id
+            sub_mask = ctrl_mask | arm_mask
+
+            X_sub = X.values[sub_mask]
+            t_sub = arm_mask[sub_mask]
+            w_sub = weights[sub_mask]
+
+            t_idx = np.where(t_sub)[0]
+            c_idx = np.where(~t_sub)[0]
+
+            # ── identify numeric features still above threshold ───────
+            imbal_j = []
+            for j, feat in enumerate(feat_cols):
+                if (pd.api.types.is_categorical_dtype(X[feat])
+                        or pd.api.types.is_object_dtype(X[feat])):
+                    continue
+                col = X_sub[:, j].astype(float)
+                if np.isnan(col).any():
+                    strategy = config.PS_NUMERIC_NAN_IMPUTE
+                    fill = (np.nanmedian(col) if strategy == 'median'
+                            else np.nanmean(col) if strategy == 'mean'
+                            else float(strategy))
+                    col = np.where(np.isnan(col), fill, col)
+                    X_sub[:, j] = col
+                w_t, w_c = w_sub[t_idx], w_sub[c_idx]
+                wmu_t = np.average(col[t_idx], weights=w_t)
+                wmu_c = np.average(col[c_idx], weights=w_c)
+                sd_pool = np.sqrt((col[t_idx].var() + col[c_idx].var()) / 2.0)
+                smd_w = abs(wmu_t - wmu_c) / sd_pool if sd_pool > 0 else 0.0
+                if smd_w > threshold:
+                    imbal_j.append(j)
+
+            if not imbal_j:
+                print(f"    Arm {arm_id}: all features already balanced — skipping")
+                continue
+
+            print(f"    Arm {arm_id}: {len(imbal_j)} feature(s) above threshold — optimising")
+
+            # ── build optimisation inputs ─────────────────────────────
+            X_t = X_sub[t_idx][:, imbal_j]   # (n_t, n_imbal)
+            X_c = X_sub[c_idx][:, imbal_j]   # (n_c, n_imbal)
+            w_t_init = w_sub[t_idx]
+            w_c      = w_sub[c_idx]
+            sum_w    = w_t_init.sum()
+
+            # targets: weighted control means, scaled by sum_w
+            targets = np.average(X_c, weights=w_c, axis=0) * sum_w  # (n_imbal,)
+
+            def objective(w):
+                w_pos = np.maximum(w, 1e-15)
+                return float(np.sum(w_pos * np.log(w_pos / w_t_init)))
+
+            def objective_grad(w):
+                w_pos = np.maximum(w, 1e-15)
+                return np.log(w_pos / w_t_init) + 1.0
+
+            constraints = [
+                # balance: X_t.T @ w = targets  (Jacobian is constant X_t.T)
+                {'type': 'eq',
+                 'fun':  lambda w: X_t.T @ w - targets,
+                 'jac':  lambda _: X_t.T},
+                # sum preservation
+                {'type': 'eq',
+                 'fun':  lambda w: w.sum() - sum_w,
+                 'jac':  lambda w: np.ones_like(w)},
+            ]
+            bounds = [(1e-8, None)] * len(w_t_init)
+
+            result = sp_minimize(
+                objective, w_t_init.copy(),
+                jac=objective_grad,
+                method='SLSQP',
+                bounds=bounds,
+                constraints=constraints,
+                options={'maxiter': 1000, 'ftol': 1e-10},
+            )
+
+            if result.success:
+                # write refined treated weights back into the full array
+                arm_pos_in_sub = t_idx         # positions within sub_mask
+                full_positions  = np.where(sub_mask)[0][arm_pos_in_sub]
+                weights[full_positions] = np.maximum(result.x, 1e-8)
+
+                # report per-feature improvement
+                w_new = weights[full_positions]
+                w_c_full = weights[np.where(sub_mask)[0][c_idx]]
+                for j in imbal_j:
+                    col = X_sub[:, j].astype(float)
+                    sd_pool = np.sqrt((col[t_idx].var() + col[c_idx].var()) / 2.0)
+                    smd_before = abs(np.average(col[t_idx], weights=w_t_init) -
+                                     np.average(col[c_idx], weights=w_c)) / sd_pool if sd_pool > 0 else 0.0
+                    smd_after  = abs(np.average(col[t_idx], weights=w_new) -
+                                     np.average(col[c_idx], weights=w_c_full)) / sd_pool if sd_pool > 0 else 0.0
+                    print(f"      {feat_cols[j]:<35}  SMD {smd_before:.4f} → {smd_after:.4f}")
+            else:
+                print(f"    WARNING Arm {arm_id}: entropy balancing did not converge "
+                      f"({result.message}) — original weights kept")
+
+        return weights
 
     # ------------------------------------------------------------------
     # Propensity score estimation

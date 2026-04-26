@@ -256,6 +256,28 @@ IPTW_RANDOM_STATE     = RANDOM_SEED
 OVERLAP_PS_METHOD       = 'catboost'  # 'catboost' | 'logistic' | 'xgboost'
 OVERLAP_TRIM_PERCENTILE = 0.0         # 0 = no trimming (weights already bounded)
 
+# ===========================================================
+# ENTROPY BALANCING REFINEMENT
+# ===========================================================
+# Optional post-processing step applied after IPTW or overlap
+# weighting.  For any feature still above BALANCE_REFINE_SMD_THRESHOLD
+# after the initial weights, entropy balancing directly optimises
+# the treated-group weights to satisfy balance constraints.
+#
+# Objective  : minimise KL divergence from initial weights
+#              (keeps weights as close to 1.0 as possible while
+#               achieving balance — avoids extreme weight collapse)
+# Constraints: weighted mean of each imbalanced feature in the
+#              treated group equals weighted mean in control group
+# Solver     : scipy SLSQP (handles linear equality + bound constraints)
+#
+# If a feature cannot converge (zero overlap), a warning is printed
+# and the original weights are kept for that arm — no crash.
+# ===========================================================
+
+BALANCE_REFINE               = False  # True → run entropy balancing after initial weights
+BALANCE_REFINE_SMD_THRESHOLD = 0.10   # refine features with |SMD| above this value
+
 # Covariates highlighted in balance plots (must survive feature selection)
 PSM_KEY_COVARIATES = [
     'estimated_income',
