@@ -527,9 +527,26 @@ CATBOOST_PROPENSITY_PARAMS = {
     'nan_mode':          'Min',
 }
 
-# Train-Test Split
+# Train-Test Split  (internal CatBoost evaluation split — used by fit())
 TEST_SIZE       = 0.3
-VALIDATION_SIZE = 0.15   # Out of training set
+VALIDATION_SIZE = 0.15   # Out of training set (attrition model early stopping)
+
+# ===========================================================
+# EVALUATION HOLD-OUT SPLIT
+# ===========================================================
+# 0.0 = disabled (backward compatible); 0.2 = recommended 80/20 split
+# Split is stratified on treatment arm. Applied after feature selection
+# (Steps 1-2), before bias correction (Step 2.5). Models train on
+# train rows only; AUUC/Qini evaluated on held-out test rows.
+EVAL_TEST_SIZE  = 0.2
+
+# ===========================================================
+# PROSPECT ID
+# ===========================================================
+# Name of the row-ID column added by generate_epsilon_data() and
+# propagated through all pipeline outputs. Must not collide with
+# any feature column name.
+PROSPECT_ID_COL = 'prospect_id'
 
 # ===========================================================
 # MODEL REGISTRY DIRECTORY

@@ -594,6 +594,11 @@ def generate_epsilon_data() -> pd.DataFrame:
     df['opening_balance'] = opening_balance.round(2)
     df['on_book_month9']  = on_book_month9
 
+    # Row identifier — inserted as the first column so it is never
+    # confused with a feature. Simple 0-based integer range; stable
+    # because the DataFrame is never shuffled during generation.
+    df.insert(0, config.PROSPECT_ID_COL, np.arange(n, dtype=np.int64))
+
     # Summary
     n_numeric = sum(1 for c in df.columns
                     if df[c].dtype.kind in ('f', 'i', 'u')

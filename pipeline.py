@@ -85,6 +85,10 @@ def main():
             print("\n⚠  Saved data lacks remail/stipulation columns — regenerating ...")
             df = generate_epsilon_data()
             save_data(df)
+        elif config.PROSPECT_ID_COL not in df.columns:
+            print(f"\n⚠  Saved data lacks '{config.PROSPECT_ID_COL}' column — regenerating ...")
+            df = generate_epsilon_data()
+            save_data(df)
     else:
         print("\nGenerating synthetic Epsilon-like data ...")
         df = generate_epsilon_data()
@@ -99,7 +103,11 @@ def main():
     #   'offer'   = excluded (it is directly encoded by the treatment arm ID)
     # ------------------------------------------------------------------
     outcome_cols = ['treatment', 'treatment_name', 'opening_balance', 'on_book_month9']
-    exclude_cols = outcome_cols + ['offer']   # offer is redundant with treatment
+    exclude_cols = outcome_cols + ['offer', config.PROSPECT_ID_COL]
+
+    # Extract row IDs before building feature matrix
+    id_col = (df[config.PROSPECT_ID_COL] if config.PROSPECT_ID_COL in df.columns
+              else pd.Series(df.index, name=config.PROSPECT_ID_COL))
 
     feature_cols = [c for c in df.columns if c not in exclude_cols]
 
@@ -242,17 +250,40 @@ def main():
     X_step2 = X_balance          # alias used in bias-correction and plotting
 
     # ================================================================
+    # EVAL HOLD-OUT SPLIT  (post-feature-selection, pre-bias-correction)
+    # ================================================================
+    eval_test_size = getattr(config, 'EVAL_TEST_SIZE', 0.0)
+    if eval_test_size > 0:
+        print(f"\n  Evaluation hold-out split: {eval_test_size:.0%} test "
+              f"(stratified on treatment arm)")
+        train_idx, test_idx = train_test_split(
+            X_step2.index,
+            test_size    = eval_test_size,
+            stratify     = treatment.loc[X_step2.index],
+            random_state = config.RANDOM_SEED,
+        )
+        print(f"  Train rows: {len(train_idx):,}   Test rows: {len(test_idx):,}")
+    else:
+        train_idx = X_step2.index
+        test_idx  = pd.Index([], dtype=X_step2.index.dtype)
+
+    # ================================================================
     # STEP 2.5: BIAS CORRECTION  (PSM / IPTW / none)
     # ================================================================
     bias_method = getattr(config, 'BIAS_CORRECTION_METHOD', 'psm').lower()
     t_step = _step_header(f"BIAS CORRECTION  [{bias_method.upper()}]", '2.5', start_time)
 
-    # Initialise defaults — overridden below depending on method
-    X_for_xlearner            = X_step2
-    t_for_xlearner            = treatment
-    y_for_xlearner            = y_balance
+    # Initialise defaults — restricted to train_idx when EVAL_TEST_SIZE > 0
+    _train_X     = X_step2.loc[train_idx]
+    _train_t     = treatment.loc[train_idx]
+    _train_y     = y_balance.loc[train_idx]
+    _train_y_att = y_attrition.loc[train_idx]
+
+    X_for_xlearner            = _train_X
+    t_for_xlearner            = _train_t
+    y_for_xlearner            = _train_y
     sample_weight_xl          = None          # IPTW weights (None → unweighted)
-    y_attrition_for_xlearner  = y_attrition
+    y_attrition_for_xlearner  = _train_y_att
 
     # ------------------------------------------------------------------
     if bias_method == 'psm':
@@ -261,8 +292,8 @@ def main():
         print("  Visual outputs: Love plots, PS overlap, covariate balance boxplots.\n")
 
         psm = run_propensity_matching(
-            X                = X_step2,
-            treatment        = treatment,
+            X                = _train_X,
+            treatment        = _train_t,
             save_results_dir = config.RESULTS_DIR,
         )
 
@@ -317,8 +348,8 @@ def main():
         print(f"    Trim percentile  : {config.IPTW_TRIM_PERCENTILE}%  (each tail)\n")
 
         iptw_result = run_iptw(
-            X                = X_step2,
-            treatment        = treatment,
+            X                = _train_X,
+            treatment        = _train_t,
             save_results_dir = config.RESULTS_DIR,
         )
         sample_weight_xl = iptw_result.weights  # passed to train_xlearner below
@@ -342,8 +373,8 @@ def main():
 
         from src.models.iptw import run_overlap
         overlap_result = run_overlap(
-            X                = X_step2,
-            treatment        = treatment,
+            X                = _train_X,
+            treatment        = _train_t,
             save_results_dir = config.RESULTS_DIR,
         )
         sample_weight_xl = overlap_result.weights
@@ -396,10 +427,26 @@ def main():
         save_results_dir = config.RESULTS_DIR,
     )
 
-    # Predict CATEs on observed features (baseline — no scenario override)
+    # Predict CATEs on all rows (train + test) for combined insights
     cates = xlearner_model.predict_all_cates(X_step2)
+
+    # Held-out test AUUC (out-of-sample evaluation)
+    if eval_test_size > 0:
+        print(f"\n  Computing held-out test AUUC ({len(test_idx):,} rows) ...")
+        auuc_df_test = xlearner_model.compute_auuc(
+            X_step2.loc[test_idx],
+            y_balance.loc[test_idx],
+            treatment.loc[test_idx],
+        )
+        auuc_test_path = os.path.join(config.RESULTS_DIR, 'auuc_metrics_test.csv')
+        auuc_df_test.to_csv(auuc_test_path, index=False)
+        print(f"  Test-set AUUC metrics saved to: {auuc_test_path}")
+
+    # Attach prospect_id and save CATE predictions
+    cates_out = cates.copy()
+    cates_out.insert(0, config.PROSPECT_ID_COL, id_col.loc[X_step2.index].values)
     cates_path = os.path.join(config.RESULTS_DIR, 'cate_predictions.csv')
-    cates.to_csv(cates_path, index=False)
+    cates_out.to_csv(cates_path, index=False)
     print(f"\n  CATE predictions saved to: {cates_path}")
     print(f"  Columns: {list(cates.columns)}")
     _step_done("X-LEARNER UPLIFT", t_step)
@@ -411,15 +458,17 @@ def main():
 
     # NOTE: X_attrition uses features selected against the ATTRITION target
     # (on_book_month9) — a separate Boruta-SHAP run from the balance path.
+    # Training is restricted to train_idx rows; predictions run on all rows.
     attrition_model = train_attrition_model(
-        X                = X_attrition,
-        y                = y_attrition,
-        treatment        = treatment,
+        X                = X_attrition.loc[train_idx],
+        y                = y_attrition.loc[train_idx],
+        treatment        = treatment.loc[train_idx],
         save_results_dir = config.RESULTS_DIR,
     )
 
     retention_proba = attrition_model.predict_proba(X_attrition, treatment=treatment)
     retention_df = pd.DataFrame({
+        config.PROSPECT_ID_COL:  id_col.values,
         'retention_probability': retention_proba,
         'predicted_on_book':    (retention_proba >= 0.5).astype(int),
     })
@@ -434,6 +483,7 @@ def main():
     t_step = _step_header("COMBINED INSIGHTS: UPLIFT + RETENTION", '4b', start_time)
 
     insights = pd.DataFrame({
+        config.PROSPECT_ID_COL:      id_col.loc[X_step2.index].values,
         'treatment':                 treatment.values,
         'treatment_name':            df['treatment_name'].values,
         'offer':                     offers_col.values,
@@ -447,9 +497,22 @@ def main():
     # Attach baseline CATE columns
     insights = pd.concat([insights, cates], axis=1)
 
+    # Mark train/test split when EVAL_TEST_SIZE > 0
+    if eval_test_size > 0:
+        insights['split'] = np.where(insights.index.isin(train_idx), 'train', 'test')
+
     insights_path = os.path.join(config.RESULTS_DIR, 'combined_insights.csv')
     insights.to_csv(insights_path, index=False)
     print(f"\n  Combined insights saved to: {insights_path}")
+
+    # Save separate train/test sub-files when hold-out split is active
+    if eval_test_size > 0:
+        train_insights_path = os.path.join(config.RESULTS_DIR, 'combined_insights_train.csv')
+        test_insights_path  = os.path.join(config.RESULTS_DIR, 'combined_insights_test.csv')
+        insights.loc[train_idx].to_csv(train_insights_path, index=False)
+        insights.loc[test_idx].to_csv(test_insights_path,  index=False)
+        print(f"  Train insights ({len(train_idx):,} rows): {train_insights_path}")
+        print(f"  Test  insights ({len(test_idx):,} rows) : {test_insights_path}")
 
     # Campaign summary by offer arm
     print("\n" + "="*70)
@@ -504,6 +567,46 @@ def main():
         save_dir    = config.RESULTS_DIR,
     )
     _step_done("DECILE TARGETING STRATEGY", t_step)
+
+    # ================================================================
+    # STEP 3c: TEST SET EVALUATION  (hold-out — net value + decile strategy)
+    # ================================================================
+    if eval_test_size > 0:
+        t_step = _step_header(
+            "STEP 3c — TEST SET EVALUATION  (held-out net value + decile strategy)",
+            '5c', start_time)
+        print(f"\n  Running net value optimisation + decile strategy on the held-out")
+        print(f"  test set ({len(test_idx):,} rows).  All model outputs are out-of-sample.\n")
+
+        test_eval_dir = os.path.join(config.RESULTS_DIR, 'test_eval')
+        os.makedirs(test_eval_dir, exist_ok=True)
+
+        test_insights = insights.loc[test_idx].copy()
+
+        # Run through the same net value maximisation pipeline as the training set
+        test_nv = optimizer.compute_net_values(test_insights)
+        test_nv = optimizer.assign_optimal_offers(test_nv)
+
+        # Decile targeting strategy — identical call to the training evaluation
+        optimizer.evaluate_decile_targeting_strategy(
+            df            = test_nv,
+            n_deciles     = 10,
+            top_n_deciles = 3,
+            save_dir      = test_eval_dir,
+        )
+
+        # Cumulative net value chart for the test set
+        qini_test = optimizer.compute_qini_curve_combined(test_nv)
+        optimizer.plot_cumulative_net_value(
+            qini_test,
+            save_path=os.path.join(test_eval_dir, 'cumulative_net_value_test.png'),
+        )
+
+        print(f"\n  Test evaluation outputs saved to: {test_eval_dir}/")
+        print(f"    • decile_distribution.png")
+        print(f"    • decile_strategy_comparison.csv / .png")
+        print(f"    • cumulative_net_value_test.png")
+        _step_done("TEST SET EVALUATION", t_step)
 
     # Update comparison plots with the personalized strategy overlay
     print("\n" + "="*60)

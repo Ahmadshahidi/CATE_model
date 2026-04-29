@@ -599,6 +599,11 @@ def main():
         sys.exit(1)
     df_raw = pd.read_csv(args.input)
     print(f"  Loaded {len(df_raw):,} rows × {df_raw.shape[1]} columns")
+    _id_col = getattr(config, 'PROSPECT_ID_COL', 'prospect_id')
+    if _id_col in df_raw.columns:
+        print(f"  ID column '{_id_col}' found — will be preserved in output.")
+    else:
+        print(f"  ⚠  ID column '{_id_col}' not found — rows identified by position only.")
 
     scenario = None
     if args.scenario:
@@ -622,6 +627,12 @@ def main():
         output_path = args.output
 
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
+    # Ensure prospect_id is the first column in the output when present
+    _id_col = getattr(config, 'PROSPECT_ID_COL', 'prospect_id')
+    if _id_col in scored.columns:
+        scored = scored[[_id_col] + [c for c in scored.columns if c != _id_col]]
+
     scored.to_csv(output_path, index=False)
     print(f"  ✓ Scored prospects saved to: {output_path}")
 

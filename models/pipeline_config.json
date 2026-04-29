@@ -1,5 +1,5 @@
 {
-  "saved_at": "2026-04-23T11:39:12.155683",
+  "saved_at": "2026-04-29T14:09:53.493571",
   "random_seed": 42,
   "treatment_components": {
     "0": 0,
@@ -26,6 +26,7 @@
   "n_deciles": 10,
   "top_n_deciles": 3,
   "log_transform_target": false,
+  "bias_correction_method": "psm",
   "catboost_classifier": {
     "iterations": 800,
     "depth": 6,
