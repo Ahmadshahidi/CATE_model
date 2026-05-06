@@ -556,6 +556,27 @@ PROSPECT_ID_COL = 'prospect_id'
 # consumed by src/scoring/score_new_data.py.
 MODELS_DIR = os.path.join(BASE_DIR, 'models')
 
+# ===========================================================
+# STAKEHOLDER VALIDATION
+# ===========================================================
+# Validates the trained model on a held-out CSV with known outcomes.
+# Input CSV must include the model features, an offer/treatment column,
+# opening_balance, and optionally open_on_9m (0/1) for attrition AUC.
+#
+# Usage:
+#   python src/evaluation/validate_stakeholder.py \
+#       --input  data/stakeholder_data.csv \
+#       --output_dir results/stakeholder_validation/
+#
+# Outputs saved to --output_dir:
+#   decile_validation.png        — observed lift by model-score decile
+#   uplift_curve.png             — Qini curve vs random baseline
+#   attrition_roc_curve.png      — ROC curve for retention_probability
+#   attrition_confusion_matrix.png — confusion matrix at optimal threshold
+#   proof_metrics.csv            — summary of all validation metrics
+#   scored_stakeholder.csv       — full scored output
+# ===========================================================
+
 # Decile targeting parameters (used by scoring script)
 N_DECILES      = 10   # Total deciles for prospect ranking
 TOP_N_DECILES  = 3    # Top deciles that receive a letter of offer
