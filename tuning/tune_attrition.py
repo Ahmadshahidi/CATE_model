@@ -44,13 +44,13 @@ _STUDY_NAME = 'attrition_catboost_classifier'
 
 def _load_data():
     """Load data and return attrition-target feature matrix."""
-    data_path = os.path.join(config.DATA_DIR, 'epsilon_synthetic.csv')
-    if os.path.exists(data_path):
-        df = pd.read_csv(data_path)
-    else:
-        from src.data_generation import generate_epsilon_data
-        print("  Generating synthetic data ...")
-        df = generate_epsilon_data()
+    data_path = os.path.join(config.DATA_DIR, config.RAW_DATA_FILE)
+    if not os.path.exists(data_path):
+        raise FileNotFoundError(
+            f"Data file not found: {data_path}\n"
+            f"Set RAW_DATA_FILE in config.py and place your data in {config.DATA_DIR}."
+        )
+    df = pd.read_csv(data_path)
 
     outcome_cols = ['treatment', 'treatment_name', 'opening_balance',
                     'on_book_month9', 'offer']

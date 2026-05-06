@@ -50,62 +50,30 @@ _STUDY_NAME  = 'xlearner_catboost_regressors'
 
 def _load_data():
     """
-    Load the bias-corrected tuning dataset produced by pipeline.py when available.
-    Falls back to raw data + feature selection if the file does not exist yet.
+    Load the bias-corrected dataset saved by pipeline.py after bias correction.
 
     Returns (X, y, treatment, sample_weight) where sample_weight is None for
     PSM-matched or unweighted runs, and a float array for IPTW/overlap runs.
     """
     tuning_path = os.path.join(config.DATA_DIR, 'xlearner_tuning_data.csv')
-    if os.path.exists(tuning_path):
-        print(f"  Loading bias-corrected tuning dataset: {tuning_path}")
-        df = pd.read_csv(tuning_path)
-        reserved = {'__treatment__', '__opening_balance__', '__sample_weight__'}
-        X = df[[c for c in df.columns if c not in reserved]]
-        y = df['__opening_balance__'].values
-        t = df['__treatment__'].values.astype(int)
-        w_col = df['__sample_weight__'].values.astype(float)
-        # Uniform weights (all 1.0) means PSM-matched or no correction — pass None
-        w = None if np.allclose(w_col, 1.0) else w_col
-        print(f"  Rows: {len(X):,}  |  Features: {X.shape[1]}  |  "
-              f"Weights: {'custom' if w is not None else 'uniform'}")
-        return X, y, t, w
-
-    # ── Fallback: raw data + feature selection ───────────────────────────────
-    print("  WARNING: xlearner_tuning_data.csv not found.")
-    print("  Run pipeline.py first to generate the bias-corrected dataset.")
-    print("  Falling back to raw data + feature selection (results may differ).\n")
-
-    from src.feature_selection.step1_initial_pruning import run_initial_pruning
-    from src.feature_selection.step2_boruta_shap import run_boruta_shap
-
-    data_path = os.path.join(config.DATA_DIR, 'epsilon_synthetic.csv')
-    if not os.path.exists(data_path):
+    if not os.path.exists(tuning_path):
         raise FileNotFoundError(
-            f"No tuning dataset found at {tuning_path} and no raw data at {data_path}. "
-            "Run pipeline.py first."
+            f"Tuning dataset not found: {tuning_path}\n"
+            "Run pipeline.py first to generate the bias-corrected tuning dataset."
         )
 
-    df = pd.read_csv(data_path)
-    outcome_cols = ['treatment', 'treatment_name', 'opening_balance',
-                    'on_book_month9', 'offer']
-    X = df[[c for c in df.columns if c not in outcome_cols]]
-    y = df['opening_balance'].values
-    t = df['treatment'].values.astype(int)
-
-    bal_feat_path = os.path.join(config.MODELS_DIR, 'balance_feature_names.json')
-    if os.path.exists(bal_feat_path):
-        with open(bal_feat_path) as fh:
-            feats = json.load(fh)
-        feats = [f for f in feats if f in X.columns]
-        if feats:
-            print(f"  Using saved balance features ({len(feats)}) for tuning.")
-            return X[feats], y, t, None
-
-    print("  Running feature selection for tuning ...")
-    X1, _ = run_initial_pruning(X, y=y, treatment=t)
-    X2, _ = run_boruta_shap(X1, y=y, task='regression')
-    return X2, y, t, None
+    print(f"  Loading bias-corrected tuning dataset: {tuning_path}")
+    df = pd.read_csv(tuning_path)
+    reserved = {'__treatment__', '__opening_balance__', '__sample_weight__'}
+    X = df[[c for c in df.columns if c not in reserved]]
+    y = df['__opening_balance__'].values
+    t = df['__treatment__'].values.astype(int)
+    w_col = df['__sample_weight__'].values.astype(float)
+    # Uniform weights (all 1.0) means PSM-matched or no correction — pass None
+    w = None if np.allclose(w_col, 1.0) else w_col
+    print(f"  Rows: {len(X):,}  |  Features: {X.shape[1]}  |  "
+          f"Weights: {'custom' if w is not None else 'uniform'}")
+    return X, y, t, w
 
 
 def _compute_auuc(y, cate_scores, t_binary):

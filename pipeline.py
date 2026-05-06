@@ -68,7 +68,7 @@ def main():
     # ================================================================
     t_step = _step_header("DATA PREPARATION", 0, start_time)
 
-    data_path = os.path.join(config.DATA_DIR, 'epsilon_synthetic.csv')
+    data_path = os.path.join(config.DATA_DIR, config.RAW_DATA_FILE)
 
     if os.path.exists(data_path):
         print(f"\nLoading existing data from {data_path}...")

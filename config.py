@@ -549,6 +549,15 @@ EVAL_TEST_SIZE  = 0.2
 PROSPECT_ID_COL = 'prospect_id'
 
 # ===========================================================
+# DATA FILE
+# ===========================================================
+# Filename (inside DATA_DIR) for the main training dataset.
+# Change this to your production data file before running the pipeline.
+# The file must be a CSV with feature columns, a treatment/offer column,
+# opening_balance, and on_book_month9.
+RAW_DATA_FILE = 'epsilon_synthetic.csv'
+
+# ===========================================================
 # MODEL REGISTRY DIRECTORY
 # ===========================================================
 # Serialized model artefacts for handoff / deployment.
