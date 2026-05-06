@@ -557,6 +557,30 @@ PROSPECT_ID_COL = 'prospect_id'
 MODELS_DIR = os.path.join(BASE_DIR, 'models')
 
 # ===========================================================
+# FULL WORKFLOW
+# ===========================================================
+#
+# 1. Run the pipeline (feature selection, bias correction, training):
+#      python pipeline.py
+#    This also saves data/xlearner_tuning_data.csv — the bias-corrected
+#    dataset used by the X-Learner tuner.
+#
+# 2. Tune hyperparameters with Optuna (each can run independently):
+#      python tuning/tune_xlearner.py   --n-trials 50   # uses xlearner_tuning_data.csv
+#      python tuning/tune_attrition.py  --n-trials 50   # uses raw data (correct)
+#      python tuning/tune_propensity.py --n-trials 40   # uses raw data (correct)
+#    Add --resume to continue a previous study without discarding prior trials.
+#
+# 3. Apply best params back to config.py:
+#      python tuning/apply_best_params.py             # all three models
+#      python tuning/apply_best_params.py --only xlearner   # one model only
+#      python tuning/apply_best_params.py --dry-run   # preview diff, no write
+#    A backup is saved to config.py.bak before any changes.
+#
+# 4. Retrain with the new hyperparameters:
+#      python pipeline.py
+#
+# ===========================================================
 # STAKEHOLDER VALIDATION
 # ===========================================================
 # Validates the trained model on a held-out CSV with known outcomes.

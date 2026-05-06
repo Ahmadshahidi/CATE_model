@@ -49,25 +49,50 @@ _STUDY_NAME  = 'xlearner_catboost_regressors'
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _load_data():
-    """Load or generate training data and run feature selection."""
-    from src.data_generation import generate_epsilon_data
+    """
+    Load the bias-corrected tuning dataset produced by pipeline.py when available.
+    Falls back to raw data + feature selection if the file does not exist yet.
+
+    Returns (X, y, treatment, sample_weight) where sample_weight is None for
+    PSM-matched or unweighted runs, and a float array for IPTW/overlap runs.
+    """
+    tuning_path = os.path.join(config.DATA_DIR, 'xlearner_tuning_data.csv')
+    if os.path.exists(tuning_path):
+        print(f"  Loading bias-corrected tuning dataset: {tuning_path}")
+        df = pd.read_csv(tuning_path)
+        reserved = {'__treatment__', '__opening_balance__', '__sample_weight__'}
+        X = df[[c for c in df.columns if c not in reserved]]
+        y = df['__opening_balance__'].values
+        t = df['__treatment__'].values.astype(int)
+        w_col = df['__sample_weight__'].values.astype(float)
+        # Uniform weights (all 1.0) means PSM-matched or no correction — pass None
+        w = None if np.allclose(w_col, 1.0) else w_col
+        print(f"  Rows: {len(X):,}  |  Features: {X.shape[1]}  |  "
+              f"Weights: {'custom' if w is not None else 'uniform'}")
+        return X, y, t, w
+
+    # ── Fallback: raw data + feature selection ───────────────────────────────
+    print("  WARNING: xlearner_tuning_data.csv not found.")
+    print("  Run pipeline.py first to generate the bias-corrected dataset.")
+    print("  Falling back to raw data + feature selection (results may differ).\n")
+
     from src.feature_selection.step1_initial_pruning import run_initial_pruning
     from src.feature_selection.step2_boruta_shap import run_boruta_shap
 
     data_path = os.path.join(config.DATA_DIR, 'epsilon_synthetic.csv')
-    if os.path.exists(data_path):
-        df = pd.read_csv(data_path)
-    else:
-        print("  Generating synthetic data ...")
-        df = generate_epsilon_data()
+    if not os.path.exists(data_path):
+        raise FileNotFoundError(
+            f"No tuning dataset found at {tuning_path} and no raw data at {data_path}. "
+            "Run pipeline.py first."
+        )
 
+    df = pd.read_csv(data_path)
     outcome_cols = ['treatment', 'treatment_name', 'opening_balance',
                     'on_book_month9', 'offer']
     X = df[[c for c in df.columns if c not in outcome_cols]]
-    y = df['opening_balance']
-    t = df['treatment']
+    y = df['opening_balance'].values
+    t = df['treatment'].values.astype(int)
 
-    # Try to load already-selected balance features from the saved model
     bal_feat_path = os.path.join(config.MODELS_DIR, 'balance_feature_names.json')
     if os.path.exists(bal_feat_path):
         with open(bal_feat_path) as fh:
@@ -75,13 +100,12 @@ def _load_data():
         feats = [f for f in feats if f in X.columns]
         if feats:
             print(f"  Using saved balance features ({len(feats)}) for tuning.")
-            return X[feats], y, t
+            return X[feats], y, t, None
 
-    # Fall back to fresh feature selection (slower)
     print("  Running feature selection for tuning ...")
     X1, _ = run_initial_pruning(X, y=y, treatment=t)
     X2, _ = run_boruta_shap(X1, y=y, task='regression')
-    return X2, y, t
+    return X2, y, t, None
 
 
 def _compute_auuc(y, cate_scores, t_binary):
@@ -135,10 +159,16 @@ def _build_params(trial: optuna.Trial) -> dict:
 
 # ── Objective ────────────────────────────────────────────────────────────────
 
-def objective(trial: optuna.Trial, X: pd.DataFrame, y, treatment) -> float:
+def objective(trial: optuna.Trial, X: pd.DataFrame, y, treatment,
+              sample_weight=None) -> float:
     """
     Train a single-arm (arm=1 vs. control) X-Learner on the training split
     and return -AUUC_lift on the validation split.
+
+    sample_weight — per-row IPTW/overlap weights from pipeline.py (or None for
+    PSM-matched / unweighted data).  Weights are applied to the Stage-1 outcome
+    models and Stage-2 CATE models so the objective reflects the same weighting
+    scheme used during full training.
     """
     from catboost import CatBoostRegressor, CatBoostClassifier, Pool
 
@@ -147,19 +177,31 @@ def objective(trial: optuna.Trial, X: pd.DataFrame, y, treatment) -> float:
     # ── Data split ─────────────────────────────────────────────────────
     t_arr = np.array(treatment, dtype=int)
     y_arr = np.array(y, dtype=float)
+    w_arr = np.array(sample_weight, dtype=float) if sample_weight is not None else None
 
     # Keep only arm-1 and control for a fast single-arm proxy
     mask_proxy = (t_arr == 0) | (t_arr == 1)
     X_p = X[mask_proxy].reset_index(drop=True)
     y_p = y_arr[mask_proxy]
     t_p = (t_arr[mask_proxy] == 1).astype(int)
+    w_p = w_arr[mask_proxy] if w_arr is not None else None
 
-    X_tr, X_val, y_tr, y_val, t_tr, t_val = train_test_split(
-        X_p, y_p, t_p,
+    split_args = [X_p, y_p, t_p]
+    if w_p is not None:
+        split_args.append(w_p)
+
+    splits = train_test_split(
+        *split_args,
         test_size    = 0.25,
         stratify     = t_p,
         random_state = config.RANDOM_SEED,
     )
+
+    if w_p is not None:
+        X_tr, X_val, y_tr, y_val, t_tr, t_val, w_tr, w_val = splits
+    else:
+        X_tr, X_val, y_tr, y_val, t_tr, t_val = splits
+        w_tr = w_val = None
 
     feat_names  = X_p.columns.tolist()
     cat_indices = [i for i, c in enumerate(feat_names)
@@ -172,12 +214,15 @@ def objective(trial: optuna.Trial, X: pd.DataFrame, y, treatment) -> float:
     ctrl_tr = t_tr == 0
     arm_tr  = t_tr == 1
 
+    w_ctrl = w_tr[ctrl_tr] if w_tr is not None else None
+    w_arm  = w_tr[arm_tr]  if w_tr is not None else None
+
     # Stage 1 — outcome models
     mu0 = CatBoostRegressor(**params)
-    mu0.fit(_pool(X_tr[ctrl_tr], y_tr[ctrl_tr]))
+    mu0.fit(_pool(X_tr[ctrl_tr], y_tr[ctrl_tr], w=w_ctrl))
 
     mu1 = CatBoostRegressor(**params)
-    mu1.fit(_pool(X_tr[arm_tr], y_tr[arm_tr]))
+    mu1.fit(_pool(X_tr[arm_tr], y_tr[arm_tr], w=w_arm))
 
     # Stage 2 — pseudo-outcomes
     mu0_pred_all_tr = mu0.predict(_pool(X_tr))
@@ -188,10 +233,10 @@ def objective(trial: optuna.Trial, X: pd.DataFrame, y, treatment) -> float:
 
     # Stage 3 — CATE models
     tau_t = CatBoostRegressor(**params)
-    tau_t.fit(_pool(X_tr[arm_tr], D_treated))
+    tau_t.fit(_pool(X_tr[arm_tr], D_treated, w=w_arm))
 
     tau_c = CatBoostRegressor(**params)
-    tau_c.fit(_pool(X_tr[ctrl_tr], D_control))
+    tau_c.fit(_pool(X_tr[ctrl_tr], D_control, w=w_ctrl))
 
     # Propensity (simple logistic for speed; fixed params)
     ps_model = CatBoostClassifier(
@@ -228,7 +273,7 @@ def run_study(n_trials: int = 50, resume: bool = False) -> dict:
     print("="*65 + "\n")
 
     print("Loading data ...")
-    X, y, treatment = _load_data()
+    X, y, treatment, sample_weight = _load_data()
     print(f"  Features : {X.shape[1]}   Rows : {len(X):,}\n")
 
     study = optuna.create_study(
@@ -240,7 +285,7 @@ def run_study(n_trials: int = 50, resume: bool = False) -> dict:
     )
 
     study.optimize(
-        lambda trial: objective(trial, X, y, treatment),
+        lambda trial: objective(trial, X, y, treatment, sample_weight=sample_weight),
         n_trials  = n_trials,
         show_progress_bar = True,
     )

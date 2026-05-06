@@ -415,6 +415,27 @@ def main():
               f"({100*retained_mask.mean():.1f}% retained)")
 
     # ================================================================
+    # SAVE BALANCED TUNING DATASET
+    # ================================================================
+    # Persist the final dataset that the X-Learner will train on so that
+    # tune_xlearner.py can tune on exactly the same (bias-corrected) data
+    # rather than the raw unbalanced input.
+    _tuning_data_path = os.path.join(config.DATA_DIR, 'xlearner_tuning_data.csv')
+    _tuning_df = (X_for_xlearner.copy()
+                  if isinstance(X_for_xlearner, pd.DataFrame)
+                  else pd.DataFrame(X_for_xlearner))
+    _tuning_df['__treatment__']      = np.asarray(t_for_xlearner)
+    _tuning_df['__opening_balance__'] = np.asarray(y_for_xlearner, dtype=float)
+    _tuning_df['__sample_weight__']  = (np.asarray(sample_weight_xl, dtype=float)
+                                        if sample_weight_xl is not None
+                                        else 1.0)
+    _tuning_df.to_csv(_tuning_data_path, index=False)
+    print(f"\n  Balanced tuning dataset saved: {_tuning_data_path}")
+    print(f"    Rows: {len(_tuning_df):,}  |  "
+          f"Weights: {'custom ({:.3f}–{:.3f})'.format(_tuning_df['__sample_weight__'].min(), _tuning_df['__sample_weight__'].max()) if sample_weight_xl is not None else 'uniform (1.0)'}")
+    del _tuning_df
+
+    # ================================================================
     # MODEL 1: X-LEARNER  (3 offer arms vs. control)
     # ================================================================
     t_step = _step_header("MODEL 1 — X-LEARNER UPLIFT  (Offer-Only Treatment)", 3, start_time)
