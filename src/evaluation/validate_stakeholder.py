@@ -46,7 +46,8 @@ import matplotlib.ticker as mticker
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, _PROJECT_ROOT)
 
-from src.scoring.score_new_data import score_prospects
+from src.scoring.score_new_data import _align_features
+from src.models.model_registry import load_pipeline
 from src.utils import set_plot_style, ensure_dir
 
 MIN_GROUP_SIZE = 5  # minimum treated or control per decile to plot
@@ -72,11 +73,11 @@ def load_data(path: str, offer_override: list = None) -> tuple:
     else:
         raise ValueError("Input must contain an 'offer', 'treatment', or 'offer_amount' column.")
 
-    if 'opening_balance' not in df.columns:
-        raise ValueError("Input must contain an 'opening_balance' column.")
+    if 'actual_opening_balance' not in df.columns:
+        raise ValueError("Input must contain an 'actual_opening_balance' column.")
 
-    if 'open_on_9m' not in df.columns:
-        print("  Note: 'open_on_9m' column not found — attrition evaluation will be skipped.")
+    if 'actual_on_book9' not in df.columns:
+        print("  Note: 'actual_on_book9' column not found — attrition evaluation will be skipped.")
 
     # Warn if key model features are missing — predictions will be invalid without them
     import json, os as _os
@@ -113,31 +114,139 @@ def load_data(path: str, offer_override: list = None) -> tuple:
 # 2. Score with model and compute ranking score
 # ─────────────────────────────────────────────────────────────
 
-def run_model_scoring(df: pd.DataFrame, models_dir: str,
-                      campaign_offers: list = None) -> pd.DataFrame:
-    # Always include control (0) in the campaign offers passed to the scorer
-    offers = sorted({0} | set(campaign_offers or []))
-    scored = score_prospects(
-        df_raw=df,
-        models_dir=models_dir,
-        campaign_offers=offers,
+def run_model_scoring(df: pd.DataFrame, models_dir: str, output_dir: str,
+                      campaign_offers: list = None) -> tuple:
+    """
+    Score prospects using the X-Learner with offer-specific CATE selection,
+    compute decile uplift analysis, and evaluate the attrition model.
+
+    The ranking score for each row is the raw CATE the model predicts for the
+    offer that row actually received (no net-value adjustment).  CATE columns
+    are relabelled by dollar amount: cate_treatment_0, cate_treatment_400, etc.
+
+    Saves to output_dir:
+      - uplift_by_decile.png
+      - attrition_roc_curve.png        (if actual_on_book9 present)
+      - attrition_confusion_matrix.png (if actual_on_book9 present)
+
+    Returns (scored_df, decile_df).
+    """
+    # ── Load models ────────────────────────────────────────────────────────────
+    pkg                     = load_pipeline(models_dir)
+    xlearner                = pkg['xlearner']
+    attrition_model         = pkg['attrition']
+    balance_feature_names   = pkg['balance_feature_names']
+    attrition_feature_names = pkg['attrition_feature_names']
+    cfg_snap                = pkg['config']
+
+    # ── Align features ─────────────────────────────────────────────────────────
+    X_balance   = _align_features(df, balance_feature_names,   label='Balance (X-Learner)')
+    X_attrition = _align_features(df, attrition_feature_names, label='Attrition')
+
+    # ── Predict CATEs (all trained arms) ───────────────────────────────────────
+    cates_df = xlearner.predict_all_cates(X_balance)
+
+    # ── Predict retention probability ──────────────────────────────────────────
+    offer_col       = df['offer_amount'].values.astype(int)
+    retention_proba = attrition_model.predict_proba(X_attrition, treatment=offer_col)
+
+    # ── Relabel CATE columns by dollar amount ──────────────────────────────────
+    # cfg_snap['treatment_components']: str(arm_id) → offer_amount
+    arm_to_offer = {int(k): int(v) for k, v in cfg_snap['treatment_components'].items()}
+    cates_by_offer = {}
+    for col in cates_df.columns:
+        arm_id    = int(col.split('_')[-1])
+        offer_amt = arm_to_offer.get(arm_id)
+        if offer_amt is not None:
+            cates_by_offer[offer_amt] = cates_df[col].values
+
+    sorted_trained = sorted(cates_by_offer.keys())
+
+    # ── Build per-row CATE score for the actual offer received ─────────────────
+    row_cate_score = np.zeros(len(df))
+    for offer in np.unique(offer_col):
+        mask = offer_col == offer
+        if offer in cates_by_offer:
+            row_cate_score[mask] = cates_by_offer[offer][mask]
+        else:
+            # Linear interpolation between adjacent trained offer amounts
+            lower_amt = max(a for a in sorted_trained if a < offer)
+            upper_amt = min(a for a in sorted_trained if a > offer)
+            alpha      = (offer - lower_amt) / (upper_amt - lower_amt)
+            interp     = ((1 - alpha) * cates_by_offer[lower_amt]
+                          + alpha     * cates_by_offer[upper_amt])
+            row_cate_score[mask] = interp[mask]
+
+    # ── Assemble scored DataFrame ──────────────────────────────────────────────
+    scored = df.copy()
+    scored['retention_probability'] = retention_proba
+    for offer_amt, arr in cates_by_offer.items():
+        scored[f'cate_treatment_{offer_amt}'] = arr
+    scored['row_cate_score'] = row_cate_score
+    scored['is_treated']     = (offer_col != 0).astype(int)
+    if 'actual_on_book9' in df.columns:
+        scored['actual_open_on_9m'] = df['actual_on_book9'].values
+
+    # ── Decile assignment (decile 1 = highest CATE score) ─────────────────────
+    rng      = np.random.default_rng(seed=42)
+    scores   = row_cate_score.copy()
+    scale    = (scores.max() - scores.min()) or 1.0
+    jittered = scores + rng.uniform(-1e-6 * scale, 1e-6 * scale, size=len(scores))
+    scored['decile'] = pd.qcut(
+        -jittered,
+        q=10,
+        labels=list(range(1, 11)),
+        duplicates='drop',
+    ).astype(int)
+
+    # ── Decile uplift table ────────────────────────────────────────────────────
+    overall_ctrl_avg = (
+        scored.loc[offer_col == 0, 'actual_opening_balance'].mean()
+        if (offer_col == 0).any() else np.nan
     )
 
-    # Ranking score: net_value_gain_vs_ctrl = optimal_NV - control_NV
-    # Note: actual opening_balance cancels in the difference, so this is
-    # purely model-driven (p_ret * CATE - offer_cost).
-    scored['net_value_gain_vs_ctrl'] = (
-        scored['optimal_net_value'] - scored['net_value_offer_0']
-    )
+    rows = []
+    for d in range(1, 11):
+        mask_d = scored['decile'] == d
+        t_mask = mask_d & (offer_col != 0)
+        c_mask = mask_d & (offer_col == 0)
 
-    scored['actual_offer']   = df['offer_amount'].values
-    scored['actual_balance'] = df['opening_balance'].values
-    scored['is_treated']     = (scored['actual_offer'] > 0).astype(int)
+        n_t   = int(t_mask.sum())
+        n_c   = int(c_mask.sum())
+        avg_t = scored.loc[t_mask, 'actual_opening_balance'].mean() if n_t > 0 else np.nan
+        avg_c = (
+            scored.loc[c_mask, 'actual_opening_balance'].mean()
+            if n_c > 0 else overall_ctrl_avg
+        )
+        uplift = avg_t - avg_c if not np.isnan(avg_t) else np.nan
 
-    if 'open_on_9m' in df.columns:
-        scored['actual_open_on_9m'] = df['open_on_9m'].values
+        rows.append({
+            'decile':              d,
+            'n_treated':           n_t,
+            'n_control':           n_c,
+            'avg_balance_treated': avg_t,
+            'avg_balance_control': avg_c,
+            'uplift':              uplift,
+            'avg_cate_score':      scored.loc[mask_d, 'row_cate_score'].mean(),
+        })
+    decile_df = pd.DataFrame(rows)
 
-    return scored
+    print("\n  Decile breakdown (uplift = avg actual_opening_balance: treated − control):")
+    print(decile_df[['decile', 'n_treated', 'n_control',
+                      'avg_balance_treated', 'avg_balance_control', 'uplift']]
+          .to_string(index=False))
+
+    # ── Uplift bar chart ───────────────────────────────────────────────────────
+    plot_uplift_barchart(decile_df, output_dir)
+
+    # ── Attrition evaluation ───────────────────────────────────────────────────
+    if 'actual_open_on_9m' in scored.columns:
+        attrition_metrics = compute_attrition_metrics(scored)
+        if attrition_metrics is not None:
+            plot_attrition_roc(attrition_metrics, output_dir)
+            plot_attrition_confusion_matrix(attrition_metrics, output_dir)
+
+    return scored, decile_df
 
 
 # ─────────────────────────────────────────────────────────────
@@ -147,8 +256,14 @@ def run_model_scoring(df: pd.DataFrame, models_dir: str,
 def compute_decile_validation(scored: pd.DataFrame,
                                n_deciles: int = 10) -> tuple:
     scored = scored.copy()
+    scores = scored['net_value_gain_vs_ctrl'].values.astype(float)
+    # Tiny jitter (1e-6 of the score range) breaks ties so qcut always
+    # produces exactly n_deciles bins even when many prospects share a score.
+    rng   = np.random.default_rng(seed=0)
+    scale = (scores.max() - scores.min()) or 1.0
+    scores = scores + rng.uniform(-1e-6 * scale, 1e-6 * scale, size=len(scores))
     scored['nv_decile'] = pd.qcut(
-        scored['net_value_gain_vs_ctrl'],
+        scores,
         q=n_deciles,
         labels=list(range(1, n_deciles + 1)),
         duplicates='drop',
@@ -292,7 +407,7 @@ def compute_attrition_metrics(scored: pd.DataFrame) -> dict | None:
     print(f"    Sensitivity (recall)    : {sensitivity:.4f}")
     print(f"    Specificity             : {specificity:.4f}")
     print(f"    Precision               : {precision:.4f}")
-    print(f"    Confusion matrix (opt threshold):")
+    print("    Confusion matrix (opt threshold):")
     print(f"      TP={tp:,}  FP={fp:,}")
     print(f"      FN={fn:,}  TN={tn:,}")
 
@@ -393,6 +508,77 @@ def plot_attrition_confusion_matrix(attrition_metrics: dict, output_dir: str) ->
 # ─────────────────────────────────────────────────────────────
 # 6. Charts
 # ─────────────────────────────────────────────────────────────
+
+def plot_uplift_barchart(decile_df: pd.DataFrame, output_dir: str) -> None:
+    """Bar chart of actual opening balance uplift per model-score decile (1=highest)."""
+    set_plot_style()
+
+    deciles = decile_df['decile'].tolist()
+    lifts   = decile_df['uplift'].tolist()
+    n_dec   = len(deciles)
+
+    finite_lifts = [v for v in lifts if not np.isnan(v)]
+    if not finite_lifts:
+        print("  Warning: no deciles with uplift data to plot.")
+        return
+
+    # Color gradient: dark blue (decile 1, highest CATE) → light blue (decile 10)
+    cmap   = plt.cm.Blues
+    colors = []
+    for i, lift in enumerate(lifts):
+        if np.isnan(lift):
+            colors.append('#cccccc')
+        else:
+            colors.append(cmap(0.85 - 0.5 * i / max(n_dec - 1, 1)))
+
+    bar_heights = [v if not np.isnan(v) else 0 for v in lifts]
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    bars = ax.bar(deciles, bar_heights, color=colors, edgecolor='white',
+                  linewidth=0.8, width=0.7)
+
+    mean_uplift = float(np.mean(finite_lifts))
+    ax.axhline(mean_uplift, color='#E63946', linestyle='--', linewidth=1.8,
+               label=f'Mean uplift  ${mean_uplift:,.0f}')
+
+    data_range = max(finite_lifts) - min(finite_lifts) if len(finite_lifts) > 1 else abs(finite_lifts[0]) or 1
+    offset     = data_range * 0.015
+    y_bottom   = min(min(finite_lifts), 0) - data_range * 0.12
+    ax.set_ylim(bottom=y_bottom)
+
+    for bar, row in zip(bars, decile_df.itertuples()):
+        x_mid = bar.get_x() + bar.get_width() / 2
+        if np.isnan(row.uplift):
+            ax.text(x_mid, y_bottom + data_range * 0.02, 'no data',
+                    ha='center', va='bottom', fontsize=7.5, color='gray', style='italic')
+        else:
+            h = bar.get_height()
+            ax.text(x_mid,
+                    h + (offset if h >= 0 else -offset * 3),
+                    f'${row.uplift:,.0f}',
+                    ha='center', va='bottom' if h >= 0 else 'top',
+                    fontsize=8.5, fontweight='bold')
+        ax.text(x_mid, y_bottom,
+                f'T:{row.n_treated}\nC:{row.n_control}',
+                ha='center', va='top', fontsize=6.5, color='#555555')
+
+    ax.set_xlabel('Model Score Decile  (1 = highest predicted CATE, 10 = lowest)', fontsize=11)
+    ax.set_ylabel('Uplift vs. Control  (avg actual_opening_balance, $)', fontsize=11)
+    ax.set_title(
+        'Decile Uplift Chart: Actual Opening Balance by Model Score\n'
+        'Treated avg − Control avg  |  Decile 1 → highest predicted CATE',
+        fontsize=13, fontweight='bold', pad=12,
+    )
+    ax.set_xticks(deciles)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'${x:,.0f}'))
+    ax.legend(fontsize=10)
+    plt.tight_layout()
+
+    path = os.path.join(output_dir, 'uplift_by_decile.png')
+    plt.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Uplift bar chart saved: {path}")
+
 
 def plot_decile_validation(decile_df: pd.DataFrame, output_dir: str) -> None:
     set_plot_style()
@@ -519,42 +705,27 @@ def plot_uplift_curve(qini_data: dict, output_dir: str) -> None:
 # 7. Summary metrics
 # ─────────────────────────────────────────────────────────────
 
-def save_proof_metrics(decile_df: pd.DataFrame, qini_data: dict,
-                        output_dir: str,
-                        attrition_metrics: dict = None) -> None:
-    valid = decile_df.dropna(subset=['observed_lift'])
+def save_proof_metrics(decile_df: pd.DataFrame, output_dir: str) -> None:
+    valid = decile_df.dropna(subset=['uplift'])
 
-    top_decile_lift = decile_df.loc[decile_df['decile'] == decile_df['decile'].max(),
-                                     'observed_lift'].values[0]
-    bot_decile_lift = decile_df.loc[decile_df['decile'] == decile_df['decile'].min(),
-                                     'observed_lift'].values[0]
+    decile_1_lift = decile_df.loc[decile_df['decile'] == 1, 'uplift'].values[0]
+    decile_10_lift = decile_df.loc[decile_df['decile'] == 10, 'uplift'].values[0]
+    n_treated_total = int(decile_df['n_treated'].sum())
+    n_control_total = int(decile_df['n_control'].sum())
 
-    ratio = (top_decile_lift / bot_decile_lift
-             if (not np.isnan(bot_decile_lift) and bot_decile_lift != 0) else np.nan)
+    ratio = (
+        decile_1_lift / decile_10_lift
+        if (not np.isnan(decile_10_lift) and decile_10_lift != 0) else np.nan
+    )
 
     metrics = {
-        'AUUC_Lift_$':            round(qini_data['auuc_lift'], 2),
-        'Decile_10_Observed_Lift': round(top_decile_lift, 2) if not np.isnan(top_decile_lift) else None,
-        'Decile_1_Observed_Lift':  round(bot_decile_lift, 2) if not np.isnan(bot_decile_lift) else None,
-        'Decile_10_to_1_Ratio':    round(ratio, 2) if not np.isnan(ratio) else None,
-        'N_Treated':              qini_data['n_treated'],
-        'N_Control':              qini_data['n_control'],
-        'N_Deciles_Plotted':      int(valid['decile'].nunique()),
+        'Decile_1_Uplift':     round(decile_1_lift, 2)  if not np.isnan(decile_1_lift)  else None,
+        'Decile_10_Uplift':    round(decile_10_lift, 2) if not np.isnan(decile_10_lift) else None,
+        'Decile_1_to_10_Ratio': round(ratio, 2)         if not np.isnan(ratio)          else None,
+        'N_Treated':           n_treated_total,
+        'N_Control':           n_control_total,
+        'N_Deciles_With_Data': int(valid['decile'].nunique()),
     }
-
-    if attrition_metrics is not None:
-        metrics.update({
-            'Attrition_AUC':              round(attrition_metrics['auc'], 4),
-            'Attrition_Optimal_Threshold': round(attrition_metrics['opt_thr'], 4),
-            'Attrition_Sensitivity':       round(attrition_metrics['sensitivity'], 4),
-            'Attrition_Specificity':       round(attrition_metrics['specificity'], 4),
-            'Attrition_Precision':         round(attrition_metrics['precision'], 4),
-            'Attrition_TP':               attrition_metrics['tp'],
-            'Attrition_FP':               attrition_metrics['fp'],
-            'Attrition_FN':               attrition_metrics['fn'],
-            'Attrition_TN':               attrition_metrics['tn'],
-            'Attrition_N':                attrition_metrics['n'],
-        })
 
     pd.DataFrame([metrics]).to_csv(os.path.join(output_dir, 'proof_metrics.csv'), index=False)
     decile_df.to_csv(os.path.join(output_dir, 'decile_breakdown.csv'), index=False)
@@ -610,30 +781,14 @@ def main():
     # 1. Load
     df, campaign_offers = load_data(args.input, offer_override=args.offers)
 
-    # 2. Score
-    scored = run_model_scoring(df, models_dir, campaign_offers=campaign_offers)
+    # 2. Score, compute decile uplift, and evaluate attrition
+    #    (charts and attrition plots are saved inside run_model_scoring)
+    scored, decile_df = run_model_scoring(
+        df, models_dir, output_dir, campaign_offers=campaign_offers
+    )
 
-    # 3. Decile validation
-    scored, decile_df = compute_decile_validation(scored, n_deciles=args.n_deciles)
-    print("\n  Decile breakdown (observed lift = avg_balance_treated - avg_balance_control):")
-    print(decile_df[['decile', 'n_treated', 'n_control', 'observed_lift', 'avg_nv_gain']]
-          .to_string(index=False))
-
-    # 4. Qini curve
-    qini_data = compute_qini_curve(scored)
-
-    # 5. Attrition evaluation (only if open_on_9m is present)
-    attrition_metrics = compute_attrition_metrics(scored)
-
-    # 6. Charts
-    plot_decile_validation(decile_df, output_dir)
-    plot_uplift_curve(qini_data, output_dir)
-    if attrition_metrics is not None:
-        plot_attrition_roc(attrition_metrics, output_dir)
-        plot_attrition_confusion_matrix(attrition_metrics, output_dir)
-
-    # 7. Metrics
-    save_proof_metrics(decile_df, qini_data, output_dir, attrition_metrics=attrition_metrics)
+    # 3. Summary metrics + decile CSV
+    save_proof_metrics(decile_df, output_dir)
 
     # Save full scored file for downstream use
     scored.to_csv(os.path.join(output_dir, 'scored_stakeholder.csv'), index=False)
