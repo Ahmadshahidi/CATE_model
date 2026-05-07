@@ -1,7 +1,7 @@
 ======================================================================
 UPLIFT MODELING PIPELINE — MODEL PACKAGE MANIFEST
 ======================================================================
-Generated  : 2026-04-29T14:09:53.493571
+Generated  : 2026-05-07T16:25:08.072921
 Directory  : /home/ahmad/CATE_Model/models
 
 ──────────────────────────────────────────────────────────────────────
@@ -14,7 +14,7 @@ DUAL FEATURE SELECTION PATHS
                   16 features → X-Learner (CATE models + propensity)
 
   Attrition path → features selected against on_book_month9
-                  15 features → AttritionModel (retention prob)
+                  16 features → AttritionModel (retention prob)
 
 ──────────────────────────────────────────────────────────────────────
 ARTEFACTS
@@ -33,7 +33,7 @@ ARTEFACTS
   Step-2 Boruta (Attrition target)
     File    : step2_boruta_attrition.joblib
     Details : n_trials=50, percentile=100
-            : Features selected: 15  → attrition_feature_names.json
+            : Features selected: 16  → attrition_feature_names.json
 
   X-Learner Uplift (CatBoostRegressor)
     File    : xlearner_uplift.joblib
@@ -43,7 +43,7 @@ ARTEFACTS
   Attrition Model (CatBoostClassifier)
     File    : attrition_model.joblib
     Details : Predicts P(on-book at month 9)
-            : Attrition feature set: 15 features
+            : Attrition feature set: 16 features
 
   Balance Feature Name List
     File    : balance_feature_names.json
@@ -51,7 +51,7 @@ ARTEFACTS
 
   Attrition Feature Name List
     File    : attrition_feature_names.json
-    Details : 15 features for AttritionModel
+    Details : 16 features for AttritionModel
 
   Config Snapshot
     File    : pipeline_config.json

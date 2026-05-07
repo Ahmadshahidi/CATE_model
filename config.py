@@ -177,7 +177,7 @@ STIPULATION_EFFECT_BY_LEVEL = {
 #               unweighted dataset.
 # ===========================================================
 
-BIAS_CORRECTION_METHOD = 'psm'   # 'psm' | 'iptw' | 'overlap' | 'none'
+BIAS_CORRECTION_METHOD = 'overlap'   # 'psm' | 'iptw' | 'overlap' | 'none'
 
 # ===========================================================
 # PROPENSITY SCORE MATCHING (PSM)
@@ -269,14 +269,18 @@ OVERLAP_TRIM_PERCENTILE = 0.0         # 0 = no trimming (weights already bounded
 #               achieving balance — avoids extreme weight collapse)
 # Constraints: weighted mean of each imbalanced feature in the
 #              treated group equals weighted mean in control group
-# Solver     : scipy SLSQP (handles linear equality + bound constraints)
+# Solver     : ebal-py (ebal_bin, effect='ATC') — Hainmueller 2012 dual-form
+#              solver; converges in milliseconds for K ≤ 16 features
 #
 # If a feature cannot converge (zero overlap), a warning is printed
 # and the original weights are kept for that arm — no crash.
 # ===========================================================
 
-BALANCE_REFINE               = False  # True → run entropy balancing after initial weights
+BALANCE_REFINE               = True  # True → run entropy balancing after initial weights
 BALANCE_REFINE_SMD_THRESHOLD = 0.10   # refine features with |SMD| above this value
+BALANCE_REFINE_TOLERANCE     = 1e-4   # ebal constraint_tolerance (convergence threshold)
+BALANCE_REFINE_ESTIMAND      = 'ATT'  # 'ATC' (reweight treated arms to match control)
+                                      # 'ATT' (reweight control to match treated arms)
 
 # Covariates highlighted in balance plots (must survive feature selection)
 PSM_KEY_COVARIATES = [
@@ -327,8 +331,8 @@ BORUTA_RANDOM_STATE  = RANDOM_SEED
 # Set to None to disable (default Boruta behaviour — include confirmed +
 # tentative only).
 # ---------------------------------------------------------------------------
-BORUTA_BALANCE_TOP_N   = None   # e.g. 30  →  keep at least 30 for X-Learner
-BORUTA_ATTRITION_TOP_N = None   # e.g. 20  →  keep at least 20 for AttritionModel
+BORUTA_BALANCE_TOP_N   = 10  # e.g. 30  →  keep at least 30 for X-Learner
+BORUTA_ATTRITION_TOP_N = 10  # e.g. 20  →  keep at least 20 for AttritionModel
 
 # ---------------------------------------------------------------------------
 # FORCE-INCLUDE FEATURES

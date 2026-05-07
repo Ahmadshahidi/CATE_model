@@ -4,15 +4,15 @@ STEP 2: LESHY (arfs) FEATURE SELECTION REPORT
 
 n_trials (max_iter) : 50
 percentile (perc)   : 100
-top_n (floor)       : None
+top_n (floor)       : 10
 force_include       : ['risk_tier', 'region', 'occupation_category', 'channel_preference', 'life_stage_category', 'stipulation']
 
   Confirmed      : 9
   Tentative      : 0  (included in output)
   Rejected       : 1426
-  Added for Top-N: 0  (rescued rejected, hit top_n=None)
+  Added for Top-N: 1  (rescued rejected, hit top_n=10)
   Force-included : 6
-  Total output   : 15
+  Total output   : 16
 
 ----------------------------------------------------------------------
 CONFIRMED FEATURES:
@@ -30,6 +30,11 @@ CONFIRMED FEATURES:
 ----------------------------------------------------------------------
 TENTATIVE FEATURES  (included in output by default):
 ----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+ADDED FOR TOP-N GUARANTEE  (top_n=10; ranked by hit_rate, originally rejected):
+----------------------------------------------------------------------
+  estimated_income                                    hit_rate=0.000
 
 ----------------------------------------------------------------------
 FORCE-INCLUDED FEATURES  (always kept regardless of verdict):
@@ -511,7 +516,7 @@ REJECTED FEATURES:
   demo_0189                                           hit_rate=0.000
   education_level                                     hit_rate=0.000
   employment_status                                   hit_rate=0.000
-  estimated_income                                    hit_rate=0.000
+  estimated_income                                    hit_rate=0.000  <- rescued for top-N
   estimated_net_worth                                 hit_rate=0.000
   fin_0001                                            hit_rate=0.000
   fin_0002                                            hit_rate=0.000

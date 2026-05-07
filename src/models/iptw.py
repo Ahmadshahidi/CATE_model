@@ -244,8 +244,10 @@ class IPTWWeighting:
             print(f"\n  Total observations trimmed: {n_trimmed_total:,}")
 
         # ── Step 4: entropy balancing refinement (optional) ──────────
+        weights_pre_ebal = None
         if getattr(config, 'BALANCE_REFINE', False):
-            weights_trimmed = self._entropy_balance_refine(
+            weights_pre_ebal = weights_trimmed.copy()
+            weights_trimmed  = self._entropy_balance_refine(
                 X, t_arr, weights_trimmed)
 
         self.weights = weights_trimmed
@@ -253,7 +255,8 @@ class IPTWWeighting:
         # ── Step 5: diagnostics ───────────────────────────────────────
         self._print_weight_summary(t_arr, weights_trimmed)
         self._compute_ess(t_arr, weights_trimmed)
-        balance_rows = self._compute_balance(X, t_arr, weights_trimmed)
+        balance_rows = self._compute_balance(X, t_arr, weights_trimmed,
+                                              weights_pre_refine=weights_pre_ebal)
         self.balance_summary = pd.DataFrame(balance_rows)
 
         if save_dir:
@@ -299,59 +302,167 @@ class IPTWWeighting:
                                  t_arr: np.ndarray,
                                  weights_init: np.ndarray) -> np.ndarray:
         """
-        Post-process weights via entropy balancing for arms that remain
-        imbalanced after IPTW / overlap weighting.
+        Post-process weights via entropy balancing (ebal-py, Hainmueller 2012).
 
-        For each treated arm, identifies features with weighted SMD above
-        BALANCE_REFINE_SMD_THRESHOLD and solves a constrained optimisation:
-
-          minimise   Σ w_i · log(w_i / w_init_i)        (KL from initial)
-          subject to X_t_imbal.T @ w_t = targets · Σw_init_t   (balance)
-                     Σ w_t = Σ w_init_t                         (sum preserved)
-                     w_i ≥ 1e-8                                  (non-negative)
-
-        On convergence the treated weights for that arm are replaced.
-        On failure a warning is printed and the original weights are kept.
+        Two modes:
+        - 'ATC' (default): per-arm, reweights each treated arm to match control
+        - 'ATT': global, reweights control group to match all treated arms combined
         """
-        from scipy.optimize import minimize as sp_minimize
+        from ebal import ebal_bin
 
-        threshold  = getattr(config, 'BALANCE_REFINE_SMD_THRESHOLD', 0.10)
-        weights    = weights_init.copy()
-        ctrl_mask  = t_arr == 0
-        feat_cols  = X.columns.tolist()
+        threshold = getattr(config, 'BALANCE_REFINE_SMD_THRESHOLD', 0.10)
+        tolerance = getattr(config, 'BALANCE_REFINE_TOLERANCE', 1e-4)
+        estimand  = getattr(config, 'BALANCE_REFINE_ESTIMAND', 'ATC').upper()
+        weights   = weights_init.copy()
+        ctrl_mask = t_arr == 0
+        feat_cols = X.columns.tolist()
 
-        print(f"\n  Entropy balancing refinement  (threshold |SMD| > {threshold})")
+        print(f"\n  Entropy balancing refinement  (mode={estimand}, threshold |SMD| > {threshold})")
 
+        # ── ATT mode: reweight control to match all treated arms combined ──
+        if estimand == 'ATT':
+            treated_mask = t_arr != 0
+            ctrl_idx = np.where(ctrl_mask)[0]
+            trt_idx  = np.where(treated_mask)[0]
+
+            if len(trt_idx) == 0 or len(ctrl_idx) == 0:
+                print("    WARNING: ATT mode requires both treated and control observations")
+                return weights
+
+            # Numeric columns only (skip categorical for ebal compatibility)
+            numeric_cols = [i for i, col in enumerate(feat_cols)
+                           if not (isinstance(X[col].dtype, pd.CategoricalDtype) or X[col].dtype == object)]
+            if not numeric_cols:
+                print("    WARNING: no numeric features found for ATT balance")
+                return weights
+
+            X_numeric = X.values[:, numeric_cols].copy().astype(float)
+
+            # Impute NaNs
+            strategy = getattr(config, 'PS_NUMERIC_NAN_IMPUTE', 'median')
+            for j in range(X_numeric.shape[1]):
+                col = X_numeric[:, j]
+                if np.isnan(col).any():
+                    fill = (np.nanmedian(col) if strategy == 'median'
+                            else np.nanmean(col) if strategy == 'mean'
+                            else float(strategy))
+                    X_numeric[:, j] = np.where(np.isnan(col), fill, col)
+
+            T_global = treated_mask.astype(int)  # 1=treated, 0=control
+            Y_dummy  = np.zeros(len(t_arr))
+            w_ctrl_init = weights[ctrl_mask].copy()
+
+            # ── remove collinear features from control matrix before ebal ──
+            # ebal raises ValueError if the control X has zero-variance or
+            # near-perfectly-correlated columns (singular constraint matrix).
+            X_ctrl_only = X_numeric[T_global == 0]
+            var_ctrl = X_ctrl_only.var(axis=0)
+            keep_local = np.where(var_ctrl > 1e-8)[0]
+            n_dropped_var = X_numeric.shape[1] - len(keep_local)
+            if n_dropped_var:
+                print(f"    Dropped {n_dropped_var} near-zero-variance feature(s) from control")
+
+            if len(keep_local) > 1:
+                corr_mat = np.abs(np.corrcoef(X_ctrl_only[:, keep_local].T))
+                np.fill_diagonal(corr_mat, 0.0)
+                drop_corr: set = set()
+                for ci in range(corr_mat.shape[0]):
+                    if ci not in drop_corr:
+                        for cj in range(ci + 1, corr_mat.shape[1]):
+                            if corr_mat[ci, cj] > 0.95:
+                                drop_corr.add(cj)
+                if drop_corr:
+                    keep_local = keep_local[[i for i in range(len(keep_local))
+                                             if i not in drop_corr]]
+                    print(f"    Dropped {len(drop_corr)} near-collinear feature(s) from control")
+
+            # map local indices back to numeric_cols for SMD reporting
+            ebal_cols_local = keep_local          # indices into X_numeric columns
+            ebal_cols_global = [numeric_cols[i] for i in ebal_cols_local]  # indices into feat_cols
+            X_ebal = X_numeric[:, ebal_cols_local]
+
+            try:
+                e = ebal_bin(
+                    max_iterations=500,
+                    constraint_tolerance=tolerance,
+                    print_level=0,
+                    effect='ATT',
+                    PCA=False,
+                )
+                out = e.ebalance(T_global, X_ebal, Y_dummy, base_weight=w_ctrl_init)
+            except Exception as exc:
+                print(f"    WARNING: ebal(ATT) raised {type(exc).__name__}: {exc} "
+                      f"— original weights kept")
+                return weights
+
+            if out['converged']:
+                # ATT reweights T=0 (control); extract those weights
+                new_ctrl_w = out['w'][T_global == 0]
+                # preserve weight sum
+                new_ctrl_w = new_ctrl_w * (w_ctrl_init.sum() / new_ctrl_w.sum())
+                new_ctrl_w = np.maximum(new_ctrl_w, 1e-8)
+                weights[ctrl_idx] = new_ctrl_w
+
+                # Report SMD improvement for the features ebal was balanced on
+                X_sub_ctrl = X.values[ctrl_mask][:, ebal_cols_global].astype(float)
+                X_sub_trt  = X.values[treated_mask][:, ebal_cols_global].astype(float)
+                _strat = getattr(config, 'PS_NUMERIC_NAN_IMPUTE', 'median')
+                for local_j, global_j in enumerate(ebal_cols_global):
+                    col_ctrl = X_sub_ctrl[:, local_j].copy()
+                    col_trt  = X_sub_trt[:, local_j].copy()
+                    for arr in (col_ctrl, col_trt):
+                        if np.isnan(arr).any():
+                            fill = (np.nanmedian(arr) if _strat == 'median'
+                                    else np.nanmean(arr) if _strat == 'mean'
+                                    else float(_strat))
+                            arr[:] = np.where(np.isnan(arr), fill, arr)
+
+                    sd_pool = np.sqrt((col_ctrl.var() + col_trt.var()) / 2.0)
+                    smd_before = (abs(np.average(col_ctrl, weights=w_ctrl_init) -
+                                      np.average(col_trt))
+                                  / sd_pool if sd_pool > 0 else 0.0)
+                    smd_after  = (abs(np.average(col_ctrl, weights=new_ctrl_w) -
+                                      np.average(col_trt))
+                                  / sd_pool if sd_pool > 0 else 0.0)
+                    print(f"    {feat_cols[global_j]:<35}  SMD {smd_before:.4f} → {smd_after:.4f}")
+
+                return weights
+            else:
+                print(f"    WARNING: ebal(ATT) did not converge (maxdiff={out.get('maxdiff', '?'):.4g}) "
+                      f"— original weights kept")
+                return weights
+
+        # ── ATC mode (default): per-arm refinement ──────────────────────────
         for arm_id in sorted(k for k in self.arm_ids if k != 0):
             arm_mask = t_arr == arm_id
             sub_mask = ctrl_mask | arm_mask
 
-            X_sub = X.values[sub_mask]
-            t_sub = arm_mask[sub_mask]
+            X_sub = X.values[sub_mask].copy()  # keep as-is (mixed numeric/categorical)
+            t_sub = arm_mask[sub_mask]          # True = arm, False = control
             w_sub = weights[sub_mask]
 
             t_idx = np.where(t_sub)[0]
             c_idx = np.where(~t_sub)[0]
 
-            # ── identify numeric features still above threshold ───────
+            # ── impute NaNs and identify numeric features above threshold ──
             imbal_j = []
             for j, feat in enumerate(feat_cols):
-                if (pd.api.types.is_categorical_dtype(X[feat])
-                        or pd.api.types.is_object_dtype(X[feat])):
+                if isinstance(X[feat].dtype, pd.CategoricalDtype) or X[feat].dtype == object:
                     continue
-                col = X_sub[:, j].astype(float)
+                col = X_sub[:, j].astype(float)  # convert to float only after skipping categorical
                 if np.isnan(col).any():
-                    strategy = config.PS_NUMERIC_NAN_IMPUTE
+                    strategy = getattr(config, 'PS_NUMERIC_NAN_IMPUTE', 'median')
                     fill = (np.nanmedian(col) if strategy == 'median'
                             else np.nanmean(col) if strategy == 'mean'
                             else float(strategy))
                     col = np.where(np.isnan(col), fill, col)
                     X_sub[:, j] = col
-                w_t, w_c = w_sub[t_idx], w_sub[c_idx]
-                wmu_t = np.average(col[t_idx], weights=w_t)
-                wmu_c = np.average(col[c_idx], weights=w_c)
+                w_t = w_sub[t_idx]
+                w_c = w_sub[c_idx]
+                wmu_t   = np.average(col[t_idx], weights=w_t)
+                wmu_c   = np.average(col[c_idx], weights=w_c)
                 sd_pool = np.sqrt((col[t_idx].var() + col[c_idx].var()) / 2.0)
-                smd_w = abs(wmu_t - wmu_c) / sd_pool if sd_pool > 0 else 0.0
+                smd_w   = abs(wmu_t - wmu_c) / sd_pool if sd_pool > 0 else 0.0
                 if smd_w > threshold:
                     imbal_j.append(j)
 
@@ -361,65 +472,56 @@ class IPTWWeighting:
 
             print(f"    Arm {arm_id}: {len(imbal_j)} feature(s) above threshold — optimising")
 
-            # ── build optimisation inputs ─────────────────────────────
-            X_t = X_sub[t_idx][:, imbal_j]   # (n_t, n_imbal)
-            X_c = X_sub[c_idx][:, imbal_j]   # (n_c, n_imbal)
-            w_t_init = w_sub[t_idx]
+            # ── entropy balancing via ebal_bin(ATC) ───────────────────────
+            # ATC reweights the treated arm (T=1) to match control (T=0) means.
+            # base_weight = current IPTW arm weights (length = n_arm).
+            # ebal internally inverts T for ATC, so base_weight is for T=1 arm.
+            X_imbal  = X_sub[:, imbal_j].astype(float)    # (n, K) — numeric only
+            T_sub    = t_sub.astype(int)                   # 1=arm, 0=control
+            w_t_init = w_sub[t_idx].copy()
             w_c      = w_sub[c_idx]
-            sum_w    = w_t_init.sum()
+            # Y_dummy: ebal requires an outcome array but we only use weights
+            Y_dummy  = np.zeros(len(t_sub))
 
-            # targets: weighted control means, scaled by sum_w
-            targets = np.average(X_c, weights=w_c, axis=0) * sum_w  # (n_imbal,)
+            try:
+                e = ebal_bin(
+                    max_iterations=500,
+                    constraint_tolerance=tolerance,
+                    print_level=0,
+                    effect="ATC",
+                    PCA=False,
+                )
+                out = e.ebalance(T_sub, X_imbal, Y_dummy, base_weight=w_t_init)
+            except Exception as exc:
+                print(f"    WARNING Arm {arm_id}: ebal raised {type(exc).__name__}: {exc} "
+                      f"— original weights kept")
+                continue
 
-            def objective(w):
-                w_pos = np.maximum(w, 1e-15)
-                return float(np.sum(w_pos * np.log(w_pos / w_t_init)))
+            if out['converged']:
+                # out['w'][T_sub==1] = refined arm weights (may have different sum)
+                new_arm_w = out['w'][T_sub == 1]
+                # preserve the original weight sum so downstream ESS is comparable
+                new_arm_w = new_arm_w * (w_t_init.sum() / new_arm_w.sum())
+                new_arm_w = np.maximum(new_arm_w, 1e-8)
 
-            def objective_grad(w):
-                w_pos = np.maximum(w, 1e-15)
-                return np.log(w_pos / w_t_init) + 1.0
+                full_positions = np.where(sub_mask)[0][t_idx]
+                weights[full_positions] = new_arm_w
 
-            constraints = [
-                # balance: X_t.T @ w = targets  (Jacobian is constant X_t.T)
-                {'type': 'eq',
-                 'fun':  lambda w: X_t.T @ w - targets,
-                 'jac':  lambda _: X_t.T},
-                # sum preservation
-                {'type': 'eq',
-                 'fun':  lambda w: w.sum() - sum_w,
-                 'jac':  lambda w: np.ones_like(w)},
-            ]
-            bounds = [(1e-8, None)] * len(w_t_init)
-
-            result = sp_minimize(
-                objective, w_t_init.copy(),
-                jac=objective_grad,
-                method='SLSQP',
-                bounds=bounds,
-                constraints=constraints,
-                options={'maxiter': 1000, 'ftol': 1e-10},
-            )
-
-            if result.success:
-                # write refined treated weights back into the full array
-                arm_pos_in_sub = t_idx         # positions within sub_mask
-                full_positions  = np.where(sub_mask)[0][arm_pos_in_sub]
-                weights[full_positions] = np.maximum(result.x, 1e-8)
-
-                # report per-feature improvement
-                w_new = weights[full_positions]
+                # report per-feature SMD improvement
                 w_c_full = weights[np.where(sub_mask)[0][c_idx]]
                 for j in imbal_j:
-                    col = X_sub[:, j].astype(float)
+                    col     = X_sub[:, j]
                     sd_pool = np.sqrt((col[t_idx].var() + col[c_idx].var()) / 2.0)
-                    smd_before = abs(np.average(col[t_idx], weights=w_t_init) -
-                                     np.average(col[c_idx], weights=w_c)) / sd_pool if sd_pool > 0 else 0.0
-                    smd_after  = abs(np.average(col[t_idx], weights=w_new) -
-                                     np.average(col[c_idx], weights=w_c_full)) / sd_pool if sd_pool > 0 else 0.0
+                    smd_before = (abs(np.average(col[t_idx], weights=w_t_init) -
+                                      np.average(col[c_idx], weights=w_c))
+                                  / sd_pool if sd_pool > 0 else 0.0)
+                    smd_after  = (abs(np.average(col[t_idx], weights=new_arm_w) -
+                                      np.average(col[c_idx], weights=w_c_full))
+                                  / sd_pool if sd_pool > 0 else 0.0)
                     print(f"      {feat_cols[j]:<35}  SMD {smd_before:.4f} → {smd_after:.4f}")
             else:
-                print(f"    WARNING Arm {arm_id}: entropy balancing did not converge "
-                      f"({result.message}) — original weights kept")
+                print(f"    WARNING Arm {arm_id}: ebal did not converge "
+                      f"(maxdiff={out.get('maxdiff', '?'):.4g}) — original weights kept")
 
         return weights
 
@@ -591,10 +693,13 @@ class IPTWWeighting:
             self.ess[arm_id] = ess
 
     def _compute_balance(self, X: pd.DataFrame, t_arr: np.ndarray,
-                          weights: np.ndarray) -> list:
+                          weights: np.ndarray,
+                          weights_pre_refine: np.ndarray = None) -> list:
         """
         Compute Standardised Mean Differences (SMD) before and after
         IPTW weighting for each arm vs. control.
+        When weights_pre_refine is supplied (entropy-balance was applied),
+        a third smd_iptw column is included showing the pre-ebal SMD.
         """
         feat_cols  = X.columns.tolist()
         ctrl_mask  = t_arr == 0
@@ -649,22 +754,34 @@ class IPTWWeighting:
                 wmu_c = np.average(col[c_idx], weights=w_c) if w_c.sum() > 0 else mu_c_uw
                 smd_w = abs(wmu_t - wmu_c) / sd_pool if sd_pool > 0 else 0.0
 
+                # SMD for IPTW/overlap weights before entropy balance
+                smd_iptw = None
+                if weights_pre_refine is not None:
+                    w_pre = weights_pre_refine[sub_mask]
+                    wmu_t_pre = (np.average(col[t_idx], weights=w_pre[t_idx])
+                                 if w_pre[t_idx].sum() > 0 else mu_t_uw)
+                    wmu_c_pre = (np.average(col[c_idx], weights=w_pre[c_idx])
+                                 if w_pre[c_idx].sum() > 0 else mu_c_uw)
+                    smd_iptw = abs(wmu_t_pre - wmu_c_pre) / sd_pool if sd_pool > 0 else 0.0
+
                 balanced = smd_w < 0.1
                 if balanced:
                     balanced_count += 1
 
                 rows.append({
-                    'arm_id':        arm_id,
-                    'arm_name':      config.TREATMENTS[arm_id],
-                    'feature':       feat,
-                    'smd_unweighted': round(smd_uw, 4),
-                    'smd_weighted':   round(smd_w, 4),
+                    'arm_id':         arm_id,
+                    'arm_name':       config.TREATMENTS[arm_id],
+                    'feature':        feat,
+                    'smd_unweighted': round(smd_uw,   4),
+                    'smd_iptw':       round(smd_iptw, 4) if smd_iptw is not None else None,
+                    'smd_weighted':   round(smd_w,    4),
                     'balanced':       balanced,
                 })
 
+            stage = "IPTW+ebal" if weights_pre_refine is not None else "IPTW"
             print(f"  Arm {arm_id} ({config.TREATMENTS[arm_id]}): "
                   f"{balanced_count}/{len(feat_cols)} features |SMD| < 0.10 "
-                  f"after IPTW")
+                  f"after {stage}")
 
         return rows
 
@@ -748,13 +865,24 @@ class IPTWWeighting:
 
         weighted_label = ('Overlap-weighted' if self.weighting_type == 'overlap'
                           else 'IPTW-weighted')
+        has_ebal = ('smd_iptw' in df.columns) and df['smd_iptw'].notna().any()
+
         fig, ax = plt.subplots(figsize=(9, max(5, len(df) * 0.45)))
         y_pos = np.arange(len(df))
 
-        ax.barh(y_pos - 0.2, df['smd_unweighted'], 0.38,
-                color='#E74C3C', alpha=0.75, label='Unweighted')
-        ax.barh(y_pos + 0.2, df['smd_weighted'],   0.38,
-                color='#2E86AB', alpha=0.75, label=weighted_label)
+        if has_ebal:
+            bar_w = 0.25
+            ax.barh(y_pos - bar_w, df['smd_unweighted'], bar_w,
+                    color='#E74C3C', alpha=0.75, label='Unweighted')
+            ax.barh(y_pos,          df['smd_iptw'],       bar_w,
+                    color='#F39C12', alpha=0.75, label=f'{weighted_label} only')
+            ax.barh(y_pos + bar_w,  df['smd_weighted'],   bar_w,
+                    color='#2E86AB', alpha=0.75, label=f'{weighted_label} + Entropy-balanced')
+        else:
+            ax.barh(y_pos - 0.2, df['smd_unweighted'], 0.38,
+                    color='#E74C3C', alpha=0.75, label='Unweighted')
+            ax.barh(y_pos + 0.2, df['smd_weighted'],   0.38,
+                    color='#2E86AB', alpha=0.75, label=weighted_label)
 
         ax.axvline(x=0.1, color='grey', linestyle='--', linewidth=1.2,
                    label='|SMD| = 0.10 threshold')
@@ -766,6 +894,9 @@ class IPTWWeighting:
         method_label = ('Overlap' if self.weighting_type == 'overlap' else 'IPTW')
         subtitle = (f'Trim={self.trim_pct}%' if self.weighting_type == 'overlap'
                     else f'Stabilised={self.stabilized}  Trim={self.trim_pct}%')
+        if has_ebal:
+            estimand = getattr(config, 'BALANCE_REFINE_ESTIMAND', 'ATC').upper()
+            subtitle = f'{subtitle}  +  Entropy-balanced ({estimand})'
         ax.set_title(f'{method_label} Love Plot — Arm {arm_id} ({arm_label}) vs. Control\n'
                      f'{subtitle}',
                      fontsize=12, fontweight='bold')

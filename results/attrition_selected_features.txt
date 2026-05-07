@@ -1,4 +1,4 @@
-Attrition Selected Features (15):
+Attrition Selected Features (16):
 ============================================================
 
   age
@@ -9,6 +9,7 @@ Attrition Selected Features (15):
   debit_card_spend_monthly
   debt_to_income_ratio
   direct_mail_responsiveness
+  estimated_income
   life_stage_category
   mortgage_balance_estimated
   occupation_category

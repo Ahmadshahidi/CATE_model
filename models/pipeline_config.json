@@ -1,5 +1,5 @@
 {
-  "saved_at": "2026-04-29T14:09:53.493571",
+  "saved_at": "2026-05-07T16:25:08.072921",
   "random_seed": 42,
   "treatment_components": {
     "0": 0,
@@ -26,7 +26,7 @@
   "n_deciles": 10,
   "top_n_deciles": 3,
   "log_transform_target": false,
-  "bias_correction_method": "psm",
+  "bias_correction_method": "overlap",
   "catboost_classifier": {
     "iterations": 800,
     "depth": 6,
@@ -73,8 +73,8 @@
   "correlation_threshold": 0.95,
   "boruta_n_trials": 50,
   "boruta_percentile": 100,
-  "boruta_balance_top_n": null,
-  "boruta_attrition_top_n": null,
+  "boruta_balance_top_n": 10,
+  "boruta_attrition_top_n": 10,
   "boruta_balance_force_include": [
     "risk_tier",
     "region",
@@ -92,5 +92,5 @@
     "stipulation"
   ],
   "n_balance_features": 16,
-  "n_attrition_features": 15
+  "n_attrition_features": 16
 }

@@ -12,3 +12,4 @@ scipy>=1.10
 joblib>=1.2
 optuna>=4.0            # Bayesian hyperparameter tuning (see tuning/)
 optuna-integration>=4.0  # CatBoost pruning callback support
+ebal>=1.0.0              # entropy balancing refinement (Hainmueller 2012)

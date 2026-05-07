@@ -4,13 +4,13 @@ STEP 2: LESHY (arfs) FEATURE SELECTION REPORT
 
 n_trials (max_iter) : 50
 percentile (perc)   : 100
-top_n (floor)       : None
+top_n (floor)       : 10
 force_include       : ['risk_tier', 'region', 'occupation_category', 'channel_preference', 'life_stage_category', 'stipulation']
 
   Confirmed      : 10
   Tentative      : 0  (included in output)
   Rejected       : 1425
-  Added for Top-N: 0  (rescued rejected, hit top_n=None)
+  Added for Top-N: 0  (rescued rejected, hit top_n=10)
   Force-included : 6
   Total output   : 16
 
