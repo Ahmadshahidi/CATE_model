@@ -162,12 +162,14 @@ def run_model_scoring(df: pd.DataFrame, models_dir: str, output_dir: str,
 
     sorted_trained = sorted(cates_by_offer.keys())
 
-    # ── Build per-row CATE score for the actual offer received ─────────────────
+    # ── Build per-row CATE score for ALL rows (treated and control alike) ────────
     row_cate_score = np.zeros(len(df))
     for offer in np.unique(offer_col):
         mask = offer_col == offer
         if offer in cates_by_offer:
             row_cate_score[mask] = cates_by_offer[offer][mask]
+        elif offer == 0:
+            pass  # control rows have no treatment CATE → keep 0.0; no interpolation
         else:
             # Linear interpolation between adjacent trained offer amounts
             lower_amt = max(a for a in sorted_trained if a < offer)
@@ -187,49 +189,33 @@ def run_model_scoring(df: pd.DataFrame, models_dir: str, output_dir: str,
     if 'actual_on_book9' in df.columns:
         scored['actual_open_on_9m'] = df['actual_on_book9'].values
 
-    # ── Decile assignment (decile 1 = highest CATE score) ─────────────────────
-    rng      = np.random.default_rng(seed=42)
-    scores   = row_cate_score.copy()
-    scale    = (scores.max() - scores.min()) or 1.0
-    jittered = scores + rng.uniform(-1e-6 * scale, 1e-6 * scale, size=len(scores))
+    # ── Decile assignment: rank everyone together, decile 1 = highest uplift ───
+    # rank(method='first') breaks all ties by position — no jitter needed
     scored['decile'] = pd.qcut(
-        -jittered,
+        scored['row_cate_score'].rank(method='first', ascending=False),
         q=10,
-        labels=list(range(1, 11)),
+        labels=range(1, 11),
         duplicates='drop',
     ).astype(int)
 
-    # ── Decile uplift table ────────────────────────────────────────────────────
-    overall_ctrl_avg = (
-        scored.loc[offer_col == 0, 'actual_opening_balance'].mean()
-        if (offer_col == 0).any() else np.nan
-    )
+    # ── Decile uplift: within each decile compare treated vs control outcomes ──
+    overall_ctrl_avg = scored.loc[scored['is_treated'] == 0, 'actual_opening_balance'].mean()
 
-    rows = []
-    for d in range(1, 11):
-        mask_d = scored['decile'] == d
-        t_mask = mask_d & (offer_col != 0)
-        c_mask = mask_d & (offer_col == 0)
-
-        n_t   = int(t_mask.sum())
-        n_c   = int(c_mask.sum())
-        avg_t = scored.loc[t_mask, 'actual_opening_balance'].mean() if n_t > 0 else np.nan
-        avg_c = (
-            scored.loc[c_mask, 'actual_opening_balance'].mean()
-            if n_c > 0 else overall_ctrl_avg
-        )
-        uplift = avg_t - avg_c if not np.isnan(avg_t) else np.nan
-
-        rows.append({
-            'decile':              d,
-            'n_treated':           n_t,
-            'n_control':           n_c,
+    def _decile_stats(grp):
+        avg_t = grp.loc[grp['is_treated'] == 1, 'actual_opening_balance'].mean()
+        avg_c = grp.loc[grp['is_treated'] == 0, 'actual_opening_balance'].mean()
+        if np.isnan(avg_c):
+            avg_c = overall_ctrl_avg  # no controls in this decile → use global avg
+        return pd.Series({
+            'n_treated':           int((grp['is_treated'] == 1).sum()),
+            'n_control':           int((grp['is_treated'] == 0).sum()),
             'avg_balance_treated': avg_t,
             'avg_balance_control': avg_c,
-            'uplift':              uplift,
-            'avg_cate_score':      scored.loc[mask_d, 'row_cate_score'].mean(),
+            'uplift':              avg_t - avg_c if not np.isnan(avg_t) else np.nan,
+            'avg_cate_score':      grp['row_cate_score'].mean(),
         })
-    decile_df = pd.DataFrame(rows)
+
+    decile_df = scored.groupby('decile').apply(_decile_stats).reset_index()
 
     print("\n  Decile breakdown (uplift = avg actual_opening_balance: treated − control):")
     print(decile_df[['decile', 'n_treated', 'n_control',
